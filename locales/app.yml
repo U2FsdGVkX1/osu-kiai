@@ -1,0 +1,46 @@
+_version: 2
+search:
+  en: Search title / artist / mapper / tags
+  zh-CN: 搜索标题 / 艺术家 / 谱师 / 标签
+add_folder:
+  en: Add library folder
+  zh-CN: 添加曲库目录
+rescan:
+  en: Rescan library
+  zh-CN: 重新扫描
+scanning:
+  en: Scanning library…
+  zh-CN: 正在扫描曲库…
+no_songs:
+  en: No songs found
+  zh-CN: 没有找到歌曲
+prev:
+  en: Previous
+  zh-CN: 上一首
+next:
+  en: Next
+  zh-CN: 下一首
+play:
+  en: Play
+  zh-CN: 播放
+pause:
+  en: Pause
+  zh-CN: 暂停
+mode_repeat:
+  en: Repeat one
+  zh-CN: 单曲循环
+mode_order:
+  en: Play in order
+  zh-CN: 顺序播放
+mode_shuffle:
+  en: Shuffle
+  zh-CN: 随机播放
+drums:
+  en: Drum mode
+  zh-CN: 鼓点模式
+no_audio_device:
+  en: Failed to open the audio device
+  zh-CN: 无法打开音频设备
+no_window:
+  en: Failed to open the window
+  zh-CN: 无法打开窗口

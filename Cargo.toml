@@ -1,0 +1,13 @@
+[package]
+name = "osu-music"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dirs = "7"
+gpui-kit = "0.7.3"
+rand = "0.9"
+rayon = "1"
+rodio = { version = "0.23", default-features = false, features = ["playback", "mp3", "vorbis", "wav", "flac"] }
+rust-i18n = "4"
+sys-locale = "0.3"
