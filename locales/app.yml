@@ -59,9 +59,9 @@ col_mapper:
 mapped_by:
   en: "Mapped by %{name}"
   zh-CN: "谱师 %{name}"
-difficulties:
-  en: "%{n} difficulties"
-  zh-CN: "%{n} 个难度"
+bpm:
+  en: "%{n} BPM"
+  zh-CN: "BPM %{n}"
 idle:
   en: Pick a song to start
   zh-CN: 选一首歌开始播放

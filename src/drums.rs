@@ -209,24 +209,52 @@ impl Timing {
     }
 }
 
-/// Parses a .osu file into the hitsounds an Auto play would trigger.
-fn chart(path: &Path) -> Vec<Hit> {
-    let text = String::from_utf8_lossy(&std::fs::read(path).unwrap_or_default()).into_owned();
+/// A .osu file split into `key: value` pairs, timing point rows and hit object rows.
+type Sections<'a> = (HashMap<&'a str, &'a str>, Vec<Vec<&'a str>>, Vec<Vec<&'a str>>);
 
-    // Split into `key: value` pairs, timing point rows and hit object rows
+fn sections(text: &str) -> Sections<'_> {
     let (mut section, mut kv, mut points, mut objects) = ("", HashMap::new(), vec![], vec![]);
     for line in text.lines().map(str::trim) {
         if line.starts_with('[') {
             section = line;
         } else if section == "[TimingPoints]" {
-            points.push(line.split(',').map(str::trim).collect::<Vec<_>>());
+            points.push(line.split(',').map(str::trim).collect());
         } else if section == "[HitObjects]" {
-            objects.push(line.split(',').collect::<Vec<_>>());
+            objects.push(line.split(',').collect());
         } else if let Some((k, v)) = line.split_once(':') {
             kv.insert(k.trim(), v.trim());
         }
     }
+    (kv, points, objects)
+}
 
+/// The song's main tempo: the BPM that lasts longest, as osu! shows it
+/// (so brief gimmick BPM changes don't count).
+pub fn bpm(path: &Path) -> Option<f64> {
+    let text = String::from_utf8_lossy(&std::fs::read(path).ok()?).into_owned();
+    let (kv, points, objects) = sections(&text);
+    let timing = Timing::new(&kv, &points)?;
+    let end = objects.iter().filter_map(|o| o.get(2)?.trim().parse::<f64>().ok()).fold(0., f64::max);
+
+    // Total time per beat length, from each timing point to the next (the last one runs to the final object).
+    // Like osu!, the first timing point counts from the start of the song.
+    let mut spans: Vec<(f64, f64)> = vec![];
+    for (i, p) in timing.points.iter().enumerate() {
+        let from = if i == 0 { 0. } else { p.time };
+        let length = (timing.points.get(i + 1).map_or(end, |n| n.time) - from).max(0.);
+        match spans.iter_mut().find(|(beat, _)| (beat - p.beat).abs() < 0.01) {
+            Some((_, total)) => *total += length,
+            None => spans.push((p.beat, length)),
+        }
+    }
+    let (beat, _) = spans.into_iter().max_by(|a, b| a.1.total_cmp(&b.1))?;
+    Some(60000. / beat)
+}
+
+/// Parses a .osu file into the hitsounds an Auto play would trigger.
+fn chart(path: &Path) -> Vec<Hit> {
+    let text = String::from_utf8_lossy(&std::fs::read(path).unwrap_or_default()).into_owned();
+    let (kv, points, objects) = sections(&text);
     let Some(timing) = Timing::new(&kv, &points) else { return vec![] };
 
     // Row format: x,y,time,type,hitSound,...; type bits: 1 circle, 2 slider, 8 spinner, 128 hold note

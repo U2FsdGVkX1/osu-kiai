@@ -75,6 +75,8 @@ struct MusicPlayer {
     /// `None` while nothing is playing or the next song is still loading
     player: Option<Player>,
     duration: Duration,
+    /// Main tempo of the current song, read when it starts playing
+    bpm: Option<f64>,
     volume: f32,
     /// The user is dragging the progress bar, so the timer must not move it
     seeking: bool,
@@ -155,6 +157,7 @@ impl MusicPlayer {
             device,
             player: None,
             duration: Duration::ZERO,
+            bpm: None,
             volume: 0.8,
             seeking: false,
             loading: Task::ready(()),
@@ -223,6 +226,7 @@ impl MusicPlayer {
     fn play(&mut self, ix: usize, cx: &mut Context<Self>) {
         self.current = Some(ix);
         self.player = None;
+        self.bpm = None;
         if let Some(pos) = self.shown.iter().position(|&i| i == ix) {
             self.list.scroll_to_item(pos, ScrollStrategy::Nearest);
         }
@@ -230,8 +234,11 @@ impl MusicPlayer {
         // Decoding the hitsound samples can take a moment, so do it off the UI thread
         let (song, on) = (self.songs[ix].clone(), self.drums.clone());
         self.loading = cx.spawn(async move |this, cx| {
-            let source = cx.background_spawn(async move { drums::open(&song, on) }).await;
+            let (source, bpm) = cx
+                .background_spawn(async move { (drums::open(&song, on), song.charts.first().and_then(|c| drums::bpm(c))) })
+                .await;
             this.update(cx, |this, cx| {
+                this.bpm = bpm;
                 if let Some(source) = source {
                     let player = Player::connect_new(this.device.mixer());
                     player.set_volume(this.volume);
@@ -463,7 +470,7 @@ impl MusicPlayer {
                         .gap_2()
                         .flex_wrap()
                         .child(chip(t!("mapped_by", name = song.creator), cx))
-                        .child(chip(t!("difficulties", n = song.charts.len()), cx)),
+                        .when_some(self.bpm, |d, bpm| d.child(chip(t!("bpm", n = bpm.round()), cx))),
                 ),
             None => v_flex()
                 .gap_1()
