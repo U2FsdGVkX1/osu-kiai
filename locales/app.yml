@@ -65,6 +65,24 @@ difficulties:
 idle:
   en: Pick a song to start
   zh-CN: 选一首歌开始播放
-volume:
-  en: Volume
-  zh-CN: 音量
+video_mode:
+  en: Video mode
+  zh-CN: 视频模式
+no_ffmpeg:
+  en: Video mode (requires FFmpeg)
+  zh-CN: 视频模式（需要安装 FFmpeg）
+ffmpeg_title:
+  en: FFmpeg is required
+  zh-CN: 需要 FFmpeg
+ffmpeg_body:
+  en: "Video mode uses FFmpeg to decode beatmap videos, but it wasn't found on this system. Install it by running this in a terminal (on Linux, use your distribution's package manager):"
+  zh-CN: 视频模式需要用 FFmpeg 解码谱面视频，但系统里没有找到它。可以在终端里运行下面的命令安装（Linux 请使用所用发行版的包管理器）：
+ffmpeg_after:
+  en: Once it's installed, click the video button again. If it still can't be found, restart this app.
+  zh-CN: 安装完成后再点一次视频按钮即可；如果仍然找不到，请重启本程序。
+ffmpeg_download:
+  en: Open FFmpeg downloads
+  zh-CN: 打开 FFmpeg 下载页
+close:
+  en: Close
+  zh-CN: 关闭

@@ -1,11 +1,13 @@
 //! osu! music: plays the songs in your osu!stable / osu!lazer library like a regular music player,
-//! with an optional drum mode that adds the hitsounds an Auto play would make.
+//! with an optional drum mode that adds the hitsounds an Auto play would make,
+//! and a video mode that plays the beatmap's video behind the UI.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod drums;
 mod library;
 mod realm;
+mod video;
 
 use std::{
     ops::Range,
@@ -19,8 +21,10 @@ use std::{
 use gpui_kit::{
     assets::{AllAssets, IconName},
     component::{
-        ActiveTheme, Icon, Sizable, StyledExt, Theme,
+        ActiveTheme, Icon, Sizable, StyledExt, Theme, WindowExt,
         button::{Button, ButtonRounded, ButtonVariants},
+        clipboard::Clipboard,
+        dialog::{DialogClose, DialogFooter},
         h_flex,
         input::{Input, InputEvent, InputState},
         slider::{Slider, SliderEvent, SliderState},
@@ -32,6 +36,7 @@ use gpui_kit::{
 use library::Song;
 use rodio::{DeviceSinkBuilder, MixerDeviceSink, Player, Source};
 use rust_i18n::t;
+use video::Video;
 
 rust_i18n::i18n!("locales", fallback = "en");
 
@@ -76,6 +81,14 @@ struct MusicPlayer {
     /// The pending song load; replacing it cancels the previous one
     loading: Task<()>,
 
+    // Video mode
+    video_mode: bool,
+    /// FFmpeg was found, so video mode can be used
+    ffmpeg: bool,
+    video: Option<Video>,
+    /// Video frames no longer on screen, waiting to be freed from the GPU on the next render
+    stale_frames: Vec<Arc<RenderImage>>,
+
     // Widgets
     search: Entity<InputState>,
     progress: Entity<SliderState>,
@@ -102,7 +115,9 @@ impl MusicPlayer {
                 SliderEvent::Release(v) => {
                     this.seeking = false;
                     if let Some(p) = &this.player {
-                        p.try_seek(this.duration.mul_f32(v.start())).ok();
+                        let pos = this.duration.mul_f32(v.start());
+                        p.try_seek(pos).ok();
+                        this.start_video(pos);
                     }
                 }
             }),
@@ -143,6 +158,10 @@ impl MusicPlayer {
             volume: 0.8,
             seeking: false,
             loading: Task::ready(()),
+            video_mode: false,
+            ffmpeg: video::available(),
+            video: None,
+            stale_frames: vec![],
             search,
             progress,
             volume_slider,
@@ -220,11 +239,24 @@ impl MusicPlayer {
                     player.append(source);
                     this.player = Some(player);
                 }
+                this.start_video(Duration::ZERO);
                 cx.notify();
             })
             .ok();
         });
         cx.notify();
+    }
+
+    /// (Re)starts the current song's video at music position `from`, or stops it when
+    /// video mode is off or the song has no video.
+    fn start_video(&mut self, from: Duration) {
+        if let Some(mut old) = self.video.take() {
+            self.stale_frames.extend(old.frame.take());
+        }
+        let video = self.current.and_then(|i| self.songs[i].video.clone());
+        if self.video_mode && self.ffmpeg {
+            self.video = video.and_then(|(path, offset)| Video::open(&path, offset, from.as_secs_f64() * 1000.));
+        }
     }
 
     /// `auto` is true when the current song finished on its own (only then does Repeat replay it).
@@ -397,7 +429,8 @@ impl MusicPlayer {
 
         // The beatmap background, or an osu!-style gradient when there is none
         let art = match cover {
-            Some(path) => img(path).size_full().rounded_xl().object_fit(ObjectFit::Cover).into_any_element(),
+            // Absolutely positioned: in normal flow an <img> keeps its own aspect ratio and would overflow the card
+            Some(path) => img(path).absolute().top_0().left_0().size_full().rounded_xl().object_fit(ObjectFit::Cover).into_any_element(),
             None => div()
                 .size_full()
                 .rounded_xl()
@@ -439,12 +472,8 @@ impl MusicPlayer {
                 .child(time(self.duration)),
         );
 
-        let volume = h_flex()
-            .gap_3()
-            .text_color(theme.muted_foreground)
-            .child(Icon::new(if self.volume == 0. { IconName::VolumeX } else { IconName::Volume2 }).small())
-            .child(Slider::new(&self.volume_slider).flex_1());
-
+        // While a video plays behind the UI, the panel turns translucent and drops its own backdrop
+        let video = self.video.is_some();
         v_flex()
             .relative()
             .w(px(340.))
@@ -453,9 +482,9 @@ impl MusicPlayer {
             .overflow_hidden()
             .border_l_1()
             .border_color(theme.border)
-            .bg(theme.sidebar)
+            .bg(if video { theme.sidebar.opacity(0.5) } else { theme.sidebar })
             // A faded copy of the cover fills the top of the panel, fading into the background
-            .when_some(cover, |d, path| {
+            .when_some(cover.filter(|_| !video), |d, path| {
                 d.child(
                     div()
                         .absolute()
@@ -463,7 +492,7 @@ impl MusicPlayer {
                         .left_0()
                         .w_full()
                         .h(px(360.))
-                        .child(img(path).size_full().object_fit(ObjectFit::Cover).opacity(0.35))
+                        .child(img(path).absolute().top_0().left_0().size_full().object_fit(ObjectFit::Cover).opacity(0.35))
                         .child(
                             div()
                                 .absolute()
@@ -482,37 +511,20 @@ impl MusicPlayer {
                     .px_6()
                     .py_8()
                     .gap_6()
-                    .child(div().w_full().h(px(164.)).rounded_xl().shadow_lg().child(art))
+                    .child(div().relative().w_full().h(px(164.)).rounded_xl().shadow_lg().child(art))
                     .child(info)
                     .child(progress)
-                    .child(self.render_controls(cx))
-                    .child(volume),
+                    .child(self.render_transport(cx))
+                    .child(self.render_options(cx)),
             )
     }
 
-    /// Play mode, previous, play / pause, next and drum mode.
-    fn render_controls(&self, cx: &Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
+    /// Previous, play / pause and next.
+    fn render_transport(&self, cx: &Context<Self>) -> impl IntoElement {
         let playing = self.player.as_ref().is_some_and(|p| !p.is_paused());
-        let drums = self.drums.load(Ordering::Relaxed);
-        let (mode_icon, mode_tip) = match self.mode {
-            Mode::Repeat => (IconName::Repeat1, t!("mode_repeat")),
-            Mode::Order => (IconName::Repeat, t!("mode_order")),
-            Mode::Shuffle => (IconName::Shuffle, t!("mode_shuffle")),
-        };
-
         h_flex()
-            .justify_between()
-            .child(
-                Button::new("mode")
-                    .ghost()
-                    .icon(mode_icon)
-                    .tooltip(mode_tip)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.mode = this.mode.next();
-                        cx.notify();
-                    })),
-            )
+            .justify_center()
+            .gap_6()
             .child(
                 Button::new("prev")
                     .ghost()
@@ -539,18 +551,106 @@ impl MusicPlayer {
                     .tooltip(t!("next"))
                     .on_click(cx.listener(|this, _, _, cx| this.next(false, cx))),
             )
+    }
+
+    /// Play mode, drum mode and video mode toggles, plus volume.
+    fn render_options(&self, cx: &Context<Self>) -> impl IntoElement {
+        let (mode_icon, mode_tip) = match self.mode {
+            Mode::Repeat => (IconName::Repeat1, t!("mode_repeat")),
+            Mode::Order => (IconName::Repeat, t!("mode_order")),
+            Mode::Shuffle => (IconName::Shuffle, t!("mode_shuffle")),
+        };
+        let video_tip = if self.ffmpeg { t!("video_mode") } else { t!("no_ffmpeg") };
+
+        h_flex()
+            .gap_1()
+            .text_color(cx.theme().muted_foreground)
             .child(
-                Button::new("drums")
+                Button::new("mode")
                     .ghost()
-                    .icon(Icon::new(IconName::Drum).when(drums, |i| i.text_color(theme.primary)))
+                    .icon(mode_icon)
+                    .tooltip(mode_tip)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.mode = this.mode.next();
+                        cx.notify();
+                    })),
+            )
+            .child(
+                toggle_button("drums", IconName::Drum, self.drums.load(Ordering::Relaxed), cx)
                     .tooltip(t!("drums"))
-                    .when(drums, |b| b.bg(theme.list_active))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.drums.fetch_xor(true, Ordering::Relaxed);
                         cx.notify();
                     })),
             )
+            .child(
+                toggle_button("video", IconName::Film, self.video_mode, cx)
+                    .tooltip(video_tip)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        // Look again while it's missing, so installing FFmpeg takes effect without a restart
+                        this.ffmpeg = this.ffmpeg || video::available();
+                        if !this.ffmpeg {
+                            return ffmpeg_dialog(window, cx);
+                        }
+                        this.video_mode = !this.video_mode;
+                        let pos = this.player.as_ref().map(Player::get_pos).unwrap_or_default();
+                        this.start_video(pos);
+                        cx.notify();
+                    })),
+            )
+            .child(
+                h_flex()
+                    .flex_1()
+                    .ml_3()
+                    .gap_3()
+                    .child(Icon::new(if self.volume == 0. { IconName::VolumeX } else { IconName::Volume2 }).small())
+                    .child(Slider::new(&self.volume_slider).flex_1()),
+            )
     }
+}
+
+/// Explains that video mode needs FFmpeg and how to install it.
+fn ffmpeg_dialog(window: &mut Window, cx: &mut App) {
+    window.open_dialog(cx, |dialog, _, cx| {
+        let theme = cx.theme();
+        let command = h_flex()
+            .gap_2()
+            .px_3()
+            .py_2()
+            .rounded_md()
+            .bg(theme.secondary)
+            .child(div().flex_1().font_family(theme.mono_font_family.clone()).child(video::INSTALL_COMMAND))
+            .child(Clipboard::new("copy-install").value(video::INSTALL_COMMAND));
+
+        dialog
+            .title(SharedString::from(t!("ffmpeg_title")))
+            .child(
+                v_flex()
+                    .gap_3()
+                    .child(SharedString::from(t!("ffmpeg_body")))
+                    .child(command)
+                    .child(div().text_sm().text_color(theme.muted_foreground).child(SharedString::from(t!("ffmpeg_after")))),
+            )
+            .footer(
+                DialogFooter::new()
+                    .child(DialogClose::new().trigger(|button| button.label(t!("close"))))
+                    .child(
+                        Button::new("ffmpeg-download")
+                            .primary()
+                            .label(t!("ffmpeg_download"))
+                            .on_click(|_, _, cx| cx.open_url(video::DOWNLOAD_URL)),
+                    ),
+            )
+    });
+}
+
+/// An icon button that turns pink while `on`.
+fn toggle_button(id: &'static str, icon: IconName, on: bool, cx: &App) -> Button {
+    let theme = cx.theme();
+    Button::new(id)
+        .ghost()
+        .icon(Icon::new(icon).when(on, |i| i.text_color(theme.primary)))
+        .when(on, |b| b.bg(theme.list_active))
 }
 
 /// Shared cell layout of the header and the song rows: index, title, artist, mapper.
@@ -593,14 +693,43 @@ fn apply_theme(window: &mut Window, cx: &mut App) {
 }
 
 impl Render for MusicPlayer {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Pick the video frame for this moment and keep redrawing while the music plays
+        let pos = self.player.as_ref().map(Player::get_pos).unwrap_or_default();
+        if let Some(video) = &mut self.video {
+            let ms = pos.as_secs_f64() * 1000.;
+            self.stale_frames.extend(video.advance(ms));
+            if video.lagging(ms) {
+                self.start_video(pos);
+            }
+            if self.player.as_ref().is_some_and(|p| !p.is_paused()) {
+                window.request_animation_frame();
+            }
+        }
+        // Every frame is a new texture, so free the ones that are no longer on screen
+        for frame in self.stale_frames.drain(..) {
+            cx.drop_image(frame, Some(window));
+        }
+
         let theme = cx.theme();
-        h_flex()
+        let frame = self.video.as_ref().and_then(|v| v.frame.clone());
+        div()
             .size_full()
             .bg(theme.background)
             .text_color(theme.foreground)
-            .child(self.render_library(cx))
-            .child(self.render_now_playing(cx))
+            // Video mode: the video fills the window behind a scrim in the theme's background colour
+            // (light themes need a stronger one, as dark video areas would otherwise swallow grey text)
+            .when_some(frame, |d, frame| {
+                d.child(img(frame).absolute().top_0().left_0().size_full().object_fit(ObjectFit::Cover))
+                    .child(div().absolute().top_0().left_0().size_full().bg(theme.background.opacity(if theme.is_dark() { 0.78 } else { 0.85 })))
+            })
+            .child(
+                h_flex()
+                    .relative()
+                    .size_full()
+                    .child(self.render_library(cx))
+                    .child(self.render_now_playing(cx)),
+            )
     }
 }
 

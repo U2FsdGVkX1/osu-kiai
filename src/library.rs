@@ -28,6 +28,8 @@ pub struct Song {
     pub key: String,
     pub audio: PathBuf,
     pub cover: Option<PathBuf>,
+    /// Background video and the music time it starts at, in ms
+    pub video: Option<(PathBuf, f64)>,
     /// Every difficulty that uses this audio file
     pub charts: Vec<PathBuf>,
     /// All files of the beatmap set, where drum mode looks for custom samples
@@ -157,9 +159,18 @@ fn lazer(root: &Path) -> Option<Vec<Files>> {
 
 // ---------- Beatmap set → songs ----------
 
-/// Reads only the head of a .osu file (up to [TimingPoints]): its `key: value` fields and background file.
-fn header(path: &Path) -> Option<(HashMap<String, String>, Option<String>)> {
-    let (mut kv, mut bg, mut events) = (HashMap::new(), None, false);
+/// What the head of a .osu file (everything before [TimingPoints]) tells us.
+struct Header {
+    kv: HashMap<String, String>,
+    /// Lowercase file name of the background image
+    background: Option<String>,
+    /// Lowercase file name of the video and the music time it starts at, in ms
+    video: Option<(String, f64)>,
+}
+
+fn header(path: &Path) -> Option<Header> {
+    let mut h = Header { kv: HashMap::new(), background: None, video: None };
+    let mut events = false;
     for line in BufReader::new(fs::File::open(path).ok()?).split(b'\n') {
         let line = String::from_utf8_lossy(&line.ok()?).trim().to_string();
         if line.starts_with('[') {
@@ -168,15 +179,19 @@ fn header(path: &Path) -> Option<(HashMap<String, String>, Option<String>)> {
             }
             events = line == "[Events]";
         } else if events {
-            // Background event: 0,0,"bg.jpg",x,y
-            if bg.is_none() && line.starts_with("0,0,") {
-                bg = line.split(',').nth(2).map(|s| s.trim_matches('"').to_lowercase());
+            // Background: 0,0,"bg.jpg",x,y   Video: Video,offset,"video.avi" (old maps write 1 for Video)
+            let parts: Vec<&str> = line.splitn(4, ',').collect();
+            let file = || parts.get(2).map(|s| s.trim_matches('"').to_lowercase());
+            match parts[0] {
+                "0" if h.background.is_none() => h.background = file(),
+                "Video" | "1" if h.video.is_none() => h.video = file().zip(parts.get(1).and_then(|o| o.parse().ok())),
+                _ => {}
             }
         } else if let Some((k, v)) = line.split_once(':') {
-            kv.insert(k.trim().to_string(), v.trim().to_string());
+            h.kv.insert(k.trim().to_string(), v.trim().to_string());
         }
     }
-    Some((kv, bg))
+    Some(h)
 }
 
 /// Groups a set's difficulties by audio file: usually one song per set, occasionally several.
@@ -189,12 +204,15 @@ fn songs_of(files: Files) -> Vec<Song> {
     charts.sort();
 
     for chart in charts {
-        let Some((kv, bg)) = header(chart) else { continue };
+        let Some(Header { kv, background, video }) = header(chart) else { continue };
         let Some(audio) = kv.get("AudioFilename").and_then(|a| files.get(&a.to_lowercase())) else {
             continue;
         };
+        // Videos can be missing (e.g. "no video" downloads), so only keep ones that exist
+        let video = video.and_then(|(file, offset)| Some((files.get(&file)?.clone(), offset)));
         if let Some(song) = songs.iter_mut().find(|s| &s.audio == audio) {
             song.charts.push(chart.clone());
+            song.video = song.video.take().or(video);
             continue;
         }
 
@@ -208,7 +226,8 @@ fn songs_of(files: Files) -> Vec<Song> {
             creator: get("Creator"),
             key: key.join(" ").to_lowercase(),
             audio: audio.clone(),
-            cover: bg.and_then(|b| files.get(&b).cloned()),
+            cover: background.and_then(|b| files.get(&b).cloned()),
+            video,
             charts: vec![chart.clone()],
             files: files.clone(),
         });

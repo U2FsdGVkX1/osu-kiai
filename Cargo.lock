@@ -4626,6 +4626,7 @@ version = "0.1.0"
 dependencies = [
  "dirs 7.0.0",
  "gpui-kit",
+ "image",
  "rand 0.9.5",
  "rayon",
  "rodio",
