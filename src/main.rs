@@ -392,10 +392,20 @@ impl MusicPlayer {
                         } else {
                             (i + 1).to_string().into_any_element()
                         };
-                        let title = div()
-                            .text_color(if current { theme.primary } else { theme.foreground })
-                            .when(current, |d| d.font_medium())
-                            .child(song.title.clone());
+                        // A small film icon after the title marks songs that have a video
+                        let title = h_flex()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_color(if current { theme.primary } else { theme.foreground })
+                                    .when(current, |d| d.font_medium())
+                                    .child(song.title.clone()),
+                            )
+                            .when(song.video.is_some(), |d| {
+                                d.child(Icon::new(IconName::Film).size(px(14.)).flex_none().text_color(theme.muted_foreground))
+                            });
 
                         columns(index, title, song.artist.clone(), song.creator.clone())
                             .id(i)
