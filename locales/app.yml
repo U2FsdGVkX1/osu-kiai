@@ -44,3 +44,27 @@ no_audio_device:
 no_window:
   en: Failed to open the window
   zh-CN: 无法打开窗口
+song_count:
+  en: "%{n} songs"
+  zh-CN: "%{n} 首"
+col_title:
+  en: Title
+  zh-CN: 标题
+col_artist:
+  en: Artist
+  zh-CN: 艺术家
+col_mapper:
+  en: Mapper
+  zh-CN: 谱师
+mapped_by:
+  en: "Mapped by %{name}"
+  zh-CN: "谱师 %{name}"
+difficulties:
+  en: "%{n} difficulties"
+  zh-CN: "%{n} 个难度"
+idle:
+  en: Pick a song to start
+  zh-CN: 选一首歌开始播放
+volume:
+  en: Volume
+  zh-CN: 音量

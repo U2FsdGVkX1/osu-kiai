@@ -19,8 +19,8 @@ use std::{
 use gpui_kit::{
     assets::{AllAssets, IconName},
     component::{
-        ActiveTheme, Selectable, Sizable, StyledExt, Theme,
-        button::{Button, ButtonVariants},
+        ActiveTheme, Icon, Sizable, StyledExt, Theme,
+        button::{Button, ButtonRounded, ButtonVariants},
         h_flex,
         input::{Input, InputEvent, InputState},
         slider::{Slider, SliderEvent, SliderState},
@@ -106,6 +106,7 @@ impl MusicPlayer {
                     }
                 }
             }),
+            cx.observe_window_appearance(window, |_, window, cx| apply_theme(window, cx)),
             cx.subscribe(&volume_slider, |this, _, (SliderEvent::Change(v) | SliderEvent::Release(v)), _| {
                 this.volume = v.start();
                 if let Some(p) = &this.player {
@@ -272,14 +273,43 @@ impl MusicPlayer {
 
     // ---------- Rendering ----------
 
-    /// Search box plus library buttons.
+    /// Left pane: search bar, column headers and the song list.
+    fn render_library(&self, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let header = columns(
+            "#",
+            SharedString::from(t!("col_title")),
+            SharedString::from(t!("col_artist")),
+            SharedString::from(t!("col_mapper")),
+        )
+        .h(px(32.))
+        .text_xs()
+        .text_color(theme.muted_foreground);
+
+        v_flex()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .child(self.render_toolbar(cx))
+            .child(div().px_2().border_b_1().border_color(theme.border).child(header))
+            .child(self.render_list(cx))
+    }
+
+    /// Search box, song count and library buttons.
     fn render_toolbar(&self, cx: &Context<Self>) -> impl IntoElement {
         h_flex()
-            .p_3()
+            .px_4()
+            .py_3()
             .gap_2()
-            .border_b_1()
-            .border_color(cx.theme().border)
             .child(Input::new(&self.search).cleanable(true).prefix(IconName::Search))
+            .child(
+                div()
+                    .flex_none()
+                    .px_1()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(SharedString::from(t!("song_count", n = self.shown.len()))),
+            )
             .child(
                 Button::new("add")
                     .ghost()
@@ -299,14 +329,16 @@ impl MusicPlayer {
 
     /// The song list; only visible rows are rendered.
     fn render_list(&self, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
         if self.shown.is_empty() {
             let text = if self.scanning { t!("scanning") } else { t!("no_songs") };
-            return div()
+            return v_flex()
                 .flex_1()
-                .flex()
+                .gap_3()
                 .items_center()
                 .justify_center()
-                .text_color(cx.theme().muted_foreground)
+                .text_color(theme.muted_foreground)
+                .child(Icon::new(IconName::ListMusic).size(px(40.)))
                 .child(SharedString::from(text))
                 .into_any_element();
         }
@@ -315,26 +347,33 @@ impl MusicPlayer {
             "songs",
             self.shown.len(),
             cx.processor(|this, range: Range<usize>, _, cx| {
+                let theme = cx.theme();
                 range
                     .map(|i| {
-                        let (ix, theme) = (this.shown[i], cx.theme());
+                        let ix = this.shown[i];
                         let song = &this.songs[ix];
-                        v_flex()
+                        let current = this.current == Some(ix);
+
+                        // The playing row swaps its number for an icon and highlights the title
+                        let index = if current {
+                            Icon::new(IconName::AudioLines).small().text_color(theme.primary).into_any_element()
+                        } else {
+                            (i + 1).to_string().into_any_element()
+                        };
+                        let title = div()
+                            .text_color(if current { theme.primary } else { theme.foreground })
+                            .when(current, |d| d.font_medium())
+                            .child(song.title.clone());
+
+                        columns(index, title, song.artist.clone(), song.creator.clone())
                             .id(i)
-                            .w_full()
-                            .h(px(52.))
-                            .px_4()
-                            .justify_center()
-                            .when(this.current == Some(ix), |d| d.bg(theme.list_active))
+                            .h(px(40.))
+                            .rounded_md()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .cursor_pointer()
+                            .when(current, |d| d.bg(theme.list_active))
                             .hover(|d| d.bg(theme.list_hover))
-                            .child(div().truncate().child(song.title.clone()))
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_sm()
-                                    .text_color(theme.muted_foreground)
-                                    .child(format!("{} · {}", song.artist, song.creator)),
-                            )
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.history.extend(this.current);
                                 this.play(ix, cx);
@@ -344,74 +383,118 @@ impl MusicPlayer {
             }),
         )
         .flex_1()
+        .px_2()
+        .py_1()
         .track_scroll(&self.list)
         .into_any_element()
     }
 
-    /// Bottom bar: cover, title + progress, playback controls, volume.
-    fn render_footer(&self, cx: &Context<Self>) -> impl IntoElement {
+    /// Right pane: cover art, song info and every playback control.
+    fn render_now_playing(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let song = self.current.map(|i| &self.songs[i]);
-        let pos = self.player.as_ref().map(Player::get_pos).unwrap_or_default();
-        let time = |d: Duration| format!("{:02}:{:02}", d.as_secs() / 60, d.as_secs() % 60);
-        let cover = match song.and_then(|s| s.cover.as_deref()) {
-            Some(path) => img(path).object_fit(ObjectFit::Cover).into_any_element(),
-            None => IconName::Music.into_any_element(),
+        let cover = song.and_then(|s| s.cover.as_deref());
+
+        // The beatmap background, or an osu!-style gradient when there is none
+        let art = match cover {
+            Some(path) => img(path).size_full().rounded_xl().object_fit(ObjectFit::Cover).into_any_element(),
+            None => div()
+                .size_full()
+                .rounded_xl()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(linear_gradient(135., linear_color_stop(rgb(0xff66aa), 0.), linear_color_stop(rgb(0x7c5cff), 1.)))
+                .child(Icon::new(IconName::Music).size(px(48.)).text_color(white()))
+                .into_any_element(),
         };
 
-        let now_playing = v_flex()
-            .flex_1()
-            .min_w_0()
-            .gap_1()
-            .child(div().truncate().font_semibold().child(song.map_or("osu! music".into(), |s| s.title.clone())))
-            .child(
-                div()
-                    .truncate()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child(song.map_or(String::new(), |s| s.artist.clone())),
-            )
-            .child(
-                h_flex()
-                    .gap_3()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(time(pos))
-                    .child(Slider::new(&self.progress).flex_1())
-                    .child(time(self.duration)),
-            );
+        let info = match song {
+            Some(song) => v_flex()
+                .gap_1()
+                .child(div().text_xl().font_semibold().line_clamp(2).child(song.title.clone()))
+                .child(div().truncate().text_color(theme.muted_foreground).child(song.artist.clone()))
+                .child(
+                    h_flex()
+                        .pt_2()
+                        .gap_2()
+                        .flex_wrap()
+                        .child(chip(t!("mapped_by", name = song.creator), cx))
+                        .child(chip(t!("difficulties", n = song.charts.len()), cx)),
+                ),
+            None => v_flex()
+                .gap_1()
+                .child(div().text_xl().font_semibold().child("osu! music"))
+                .child(div().text_color(theme.muted_foreground).child(SharedString::from(t!("idle")))),
+        };
 
-        h_flex()
-            .p_3()
-            .gap_4()
-            .border_t_1()
+        let pos = self.player.as_ref().map(Player::get_pos).unwrap_or_default();
+        let time = |d: Duration| format!("{:02}:{:02}", d.as_secs() / 60, d.as_secs() % 60);
+        let progress = v_flex().gap_1().child(Slider::new(&self.progress)).child(
+            h_flex()
+                .justify_between()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(time(pos))
+                .child(time(self.duration)),
+        );
+
+        let volume = h_flex()
+            .gap_3()
+            .text_color(theme.muted_foreground)
+            .child(Icon::new(if self.volume == 0. { IconName::VolumeX } else { IconName::Volume2 }).small())
+            .child(Slider::new(&self.volume_slider).flex_1());
+
+        v_flex()
+            .relative()
+            .w(px(340.))
+            .flex_none()
+            .h_full()
+            .overflow_hidden()
+            .border_l_1()
             .border_color(theme.border)
+            .bg(theme.sidebar)
+            // A faded copy of the cover fills the top of the panel, fading into the background
+            .when_some(cover, |d, path| {
+                d.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .w_full()
+                        .h(px(360.))
+                        .child(img(path).size_full().object_fit(ObjectFit::Cover).opacity(0.35))
+                        .child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .size_full()
+                                .bg(linear_gradient(180., linear_color_stop(theme.sidebar.opacity(0.2), 0.), linear_color_stop(theme.sidebar, 1.))),
+                        ),
+                )
+            })
             .child(
-                div()
-                    .size(px(56.))
-                    .flex_none()
-                    .flex()
-                    .items_center()
+                v_flex()
+                    .relative()
+                    .flex_1()
                     .justify_center()
-                    .rounded_md()
-                    .overflow_hidden()
-                    .bg(theme.muted)
-                    .child(cover),
-            )
-            .child(now_playing)
-            .child(self.render_controls(cx))
-            .child(
-                h_flex()
-                    .gap_2()
-                    .w_32()
-                    .child(IconName::Volume2)
-                    .child(Slider::new(&self.volume_slider).flex_1()),
+                    .px_6()
+                    .py_8()
+                    .gap_6()
+                    .child(div().w_full().h(px(164.)).rounded_xl().shadow_lg().child(art))
+                    .child(info)
+                    .child(progress)
+                    .child(self.render_controls(cx))
+                    .child(volume),
             )
     }
 
-    /// Previous / play-pause / next, play mode and drum mode buttons.
+    /// Play mode, previous, play / pause, next and drum mode.
     fn render_controls(&self, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
         let playing = self.player.as_ref().is_some_and(|p| !p.is_paused());
+        let drums = self.drums.load(Ordering::Relaxed);
         let (mode_icon, mode_tip) = match self.mode {
             Mode::Repeat => (IconName::Repeat1, t!("mode_repeat")),
             Mode::Order => (IconName::Repeat, t!("mode_order")),
@@ -419,29 +502,7 @@ impl MusicPlayer {
         };
 
         h_flex()
-            .gap_1()
-            .child(
-                Button::new("prev")
-                    .ghost()
-                    .icon(IconName::SkipBack)
-                    .tooltip(t!("prev"))
-                    .on_click(cx.listener(|this, _, _, cx| this.prev(cx))),
-            )
-            .child(
-                Button::new("play")
-                    .primary()
-                    .large()
-                    .icon(if playing { IconName::Pause } else { IconName::Play })
-                    .tooltip(if playing { t!("pause") } else { t!("play") })
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle(cx))),
-            )
-            .child(
-                Button::new("next")
-                    .ghost()
-                    .icon(IconName::SkipForward)
-                    .tooltip(t!("next"))
-                    .on_click(cx.listener(|this, _, _, cx| this.next(false, cx))),
-            )
+            .justify_between()
             .child(
                 Button::new("mode")
                     .ghost()
@@ -453,11 +514,37 @@ impl MusicPlayer {
                     })),
             )
             .child(
+                Button::new("prev")
+                    .ghost()
+                    .large()
+                    .icon(IconName::SkipBack)
+                    .tooltip(t!("prev"))
+                    .on_click(cx.listener(|this, _, _, cx| this.prev(cx))),
+            )
+            .child(
+                Button::new("play")
+                    .primary()
+                    .with_size(px(36.))
+                    .size(px(56.))
+                    .rounded(ButtonRounded::Size(px(28.)))
+                    .icon(if playing { IconName::Pause } else { IconName::Play })
+                    .tooltip(if playing { t!("pause") } else { t!("play") })
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle(cx))),
+            )
+            .child(
+                Button::new("next")
+                    .ghost()
+                    .large()
+                    .icon(IconName::SkipForward)
+                    .tooltip(t!("next"))
+                    .on_click(cx.listener(|this, _, _, cx| this.next(false, cx))),
+            )
+            .child(
                 Button::new("drums")
                     .ghost()
-                    .icon(IconName::Drum)
+                    .icon(Icon::new(IconName::Drum).when(drums, |i| i.text_color(theme.primary)))
                     .tooltip(t!("drums"))
-                    .selected(self.drums.load(Ordering::Relaxed))
+                    .when(drums, |b| b.bg(theme.list_active))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.drums.fetch_xor(true, Ordering::Relaxed);
                         cx.notify();
@@ -466,16 +553,54 @@ impl MusicPlayer {
     }
 }
 
+/// Shared cell layout of the header and the song rows: index, title, artist, mapper.
+fn columns(index: impl IntoElement, title: impl IntoElement, artist: impl IntoElement, mapper: impl IntoElement) -> Div {
+    h_flex()
+        .w_full()
+        .px_3()
+        .gap_3()
+        .child(div().w(px(28.)).flex_none().flex().justify_end().child(index))
+        .child(div().flex_1().min_w_0().truncate().child(title))
+        .child(div().w(relative(0.28)).flex_none().truncate().child(artist))
+        .child(div().w(px(140.)).flex_none().truncate().child(mapper))
+}
+
+/// A small rounded label in the Now Playing panel.
+fn chip(text: impl Into<SharedString>, cx: &App) -> Div {
+    div()
+        .px_2()
+        .py_0p5()
+        .rounded_full()
+        .bg(cx.theme().secondary)
+        .text_xs()
+        .text_color(cx.theme().muted_foreground)
+        .child(text.into())
+}
+
+/// Follows the system light / dark mode, tinted with osu!'s signature pink.
+fn apply_theme(window: &mut Window, cx: &mut App) {
+    Theme::sync_system_appearance(Some(window), cx);
+    let pink: Hsla = rgb(0xff66aa).into();
+    Theme::update(cx, |t| {
+        (t.primary, t.button_primary) = (pink, pink);
+        (t.primary_hover, t.button_primary_hover) = (Hsla { l: 0.76, ..pink }, Hsla { l: 0.76, ..pink });
+        (t.primary_active, t.button_primary_active) = (Hsla { l: 0.64, ..pink }, Hsla { l: 0.64, ..pink });
+        (t.primary_foreground, t.button_primary_foreground) = (white(), white());
+        (t.slider_bar, t.slider_thumb, t.progress_bar) = (pink, white(), pink);
+        (t.ring, t.list_active, t.list_active_border) = (pink, pink.opacity(0.12), pink);
+        t.selection = pink.opacity(0.35);
+    });
+}
+
 impl Render for MusicPlayer {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        v_flex()
+        h_flex()
             .size_full()
             .bg(theme.background)
             .text_color(theme.foreground)
-            .child(self.render_toolbar(cx))
-            .child(self.render_list(cx))
-            .child(self.render_footer(cx))
+            .child(self.render_library(cx))
+            .child(self.render_now_playing(cx))
     }
 }
 
@@ -488,7 +613,8 @@ fn main() {
     application().with_assets(AllAssets).run(|cx| {
         gpui_kit::init(cx);
         let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(960.), px(680.)), cx))),
+            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(1120.), px(720.)), cx))),
+            window_min_size: Some(size(px(860.), px(560.))),
             titlebar: Some(TitlebarOptions {
                 title: Some("osu! music".into()),
                 ..Default::default()
@@ -496,7 +622,7 @@ fn main() {
             ..Default::default()
         };
         gpui_kit::open_window(options, cx, |window, cx| {
-            Theme::sync_system_appearance(Some(window), cx);
+            apply_theme(window, cx);
             cx.new(|cx| MusicPlayer::new(window, cx))
         })
         .expect(&t!("no_window"));
