@@ -298,10 +298,10 @@ impl MusicPlayer {
         self.loading = cx.spawn(async move |this, cx| {
             let (opened, stars, chart, bpm) = cx
                 .background_spawn(async move {
-                    let stars: Vec<f64> = song.charts.par_iter().map(|c| library::stars(&c.path)).collect();
+                    let rated: Vec<_> = song.charts.par_iter().map(|c| library::rate(&c.path)).collect();
+                    let stars: Vec<f64> = rated.iter().map(|r| r.0).collect();
                     let chart = keep.unwrap_or_else(|| library::pick(&stars, preferred));
-                    let bpm = drums::bpm(&song.charts[chart].path);
-                    (drums::open(&song, chart, builtin, on), stars, chart, bpm)
+                    (drums::open(&song, chart, builtin, on), stars, chart, rated[chart].1)
                 })
                 .await;
             this.update(cx, |this, cx| {

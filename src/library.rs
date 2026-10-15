@@ -54,12 +54,12 @@ pub fn category(stars: f64) -> usize {
     [2.0, 2.7, 4.0, 5.3, 6.5].iter().filter(|&&t| stars >= t).count()
 }
 
-/// Star rating of a difficulty, calculated like osu!lazer does (0 if it can't be read).
-pub fn stars(chart: &Path) -> f64 {
-    rosu_pp::Beatmap::from_path(chart)
-        .ok()
-        .and_then(|map| rosu_pp::Difficulty::new().checked_calculate(&map).ok())
-        .map_or(0., |attrs| attrs.stars())
+/// Star rating and main tempo of a difficulty, both as osu!lazer calculates them (0 stars and no BPM
+/// if it can't be read). The main tempo is the BPM that lasts longest, so brief gimmick changes don't count.
+pub fn rate(chart: &Path) -> (f64, Option<f64>) {
+    let Ok(map) = rosu_pp::Beatmap::from_path(chart) else { return (0., None) };
+    let stars = rosu_pp::Difficulty::new().checked_calculate(&map).map_or(0., |attrs| attrs.stars());
+    (stars, Some(map.bpm()).filter(|bpm| bpm.is_finite()))
 }
 
 /// The difficulty to play for a preferred category: the hardest one in that category or below,
@@ -76,13 +76,7 @@ pub fn pick(stars: &[f64], preferred: usize) -> usize {
 // ---------- Manually added library folders ----------
 
 fn config() -> PathBuf {
-    let dir = dirs::config_dir().unwrap_or_default();
-    let path = dir.join("osu-kiai.txt");
-    // Carry the list over from before the app was renamed
-    if !path.exists() {
-        fs::rename(dir.join("osu-music.txt"), &path).ok();
-    }
-    path
+    dirs::config_dir().unwrap_or_default().join("osu-kiai.txt")
 }
 
 pub fn add_folder(path: &Path) {

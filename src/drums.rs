@@ -19,6 +19,10 @@ use rodio::{
     ChannelCount, Decoder, SampleRate, Source,
     source::{SeekError, UniformSourceIterator},
 };
+use rosu_map::section::hit_objects::{
+    HitObjectKind,
+    hit_samples::{HitSampleInfo, HitSampleInfoName, SampleBank},
+};
 
 use crate::library::Song;
 
@@ -37,9 +41,6 @@ const SAMPLES: [(&str, &[u8]); 15] = samples!(
     "drum-hitnormal" "drum-hitwhistle" "drum-hitfinish" "drum-hitclap" "drum-slidertick"
 );
 
-/// Sample banks in .osu numbering: 1 = normal, 2 = soft, 3 = drum (0 = inherit).
-const BANKS: [&str; 3] = ["normal", "soft", "drum"];
-
 // ---------- Chart parsing ----------
 
 /// One sound to play.
@@ -53,229 +54,62 @@ struct Hit {
     volume: f32,
 }
 
-/// A timing point with inherited values already resolved.
-struct Point {
-    time: f64,
-    /// Beat length of the governing uninherited (red) line, in ms.
-    beat: f64,
-    /// Slider velocity multiplier from an inherited (green) line; 1.0 on red lines.
-    sv: f64,
-    bank: usize,
-    index: u32,
-    volume: f64,
-}
-
-/// The `normalSet:additionSet:index:volume:filename` part of a hit object.
-/// Zero values mean "inherit from the timing point".
-#[derive(Clone, Copy)]
-struct HitSample<'a> {
-    normal: usize,
-    addition: usize,
-    index: u32,
-    volume: f64,
-    file: &'a str,
-}
-
-impl<'a> HitSample<'a> {
-    fn parse(s: Option<&'a str>) -> Self {
-        let mut parts = s.unwrap_or_default().split(':');
-        let mut num = || parts.next().and_then(|p| p.trim().parse::<f64>().ok()).unwrap_or(0.0);
-        let (normal, addition, index, volume) = (num() as usize, num() as usize, num() as u32, num());
-        Self { normal, addition, index, volume, file: parts.next().unwrap_or_default().trim() }
-    }
-}
-
-/// Builds a hit for e.g. `soft-hitclap`. Index 0 uses the built-in sample only,
-/// index 1 looks for `soft-hitclap.wav` in the beatmap, index N for `soft-hitclapN.wav`.
-fn sample(time: f64, bank: usize, sound: &str, index: u32, volume: f32) -> Hit {
-    let default = format!("{}-{sound}", BANKS[bank - 1]);
+/// Builds a hit for e.g. `soft-hitclap`. Custom index 0 uses the built-in sample only,
+/// 1 looks for `soft-hitclap.wav` in the beatmap, N for `soft-hitclapN.wav`.
+fn sample(time: f64, bank: SampleBank, sound: &str, index: i32, volume: i32) -> Hit {
+    let default = format!("{bank}-{sound}");
     let file = match index {
         0 => String::new(),
         1 => default.clone(),
         i => format!("{default}{i}"),
     };
-    Hit { time, file, default, volume }
+    Hit { time, file, default, volume: volume as f32 / 100. }
 }
 
-/// Everything needed to place hitsounds on the timeline.
-struct Timing {
-    points: Vec<Point>,
-    /// `[General] SampleSet`, the last fallback when no bank is set anywhere else.
-    default_bank: usize,
-    /// `[Difficulty] SliderMultiplier`
-    multiplier: f64,
-    /// `[Difficulty] SliderTickRate`
-    tick_rate: f64,
+/// The hits of an object or slider node, whose samples have their bank, index and volume resolved already.
+/// Like osu!stable (unlike lazer), a custom file plays instead of all the other sounds, additions included;
+/// osu!'s hitnormal stands in when the file is missing.
+fn hits_at(time: f64, samples: &[HitSampleInfo]) -> impl Iterator<Item = Hit> {
+    let custom = samples.iter().find(|s| matches!(s.name, HitSampleInfoName::File(_)));
+    custom.map_or(samples, std::slice::from_ref).iter().map(move |s| match &s.name {
+        HitSampleInfoName::Default(sound) => sample(time, s.bank, sound.to_lowercase_str(), s.custom_sample_bank, s.volume),
+        HitSampleInfoName::File(file) => Hit { time, file: file.clone(), default: "normal-hitnormal".into(), volume: s.volume as f32 / 100. },
+    })
 }
 
-impl Timing {
-    fn new(kv: &HashMap<&str, &str>, rows: &[Vec<&str>]) -> Option<Self> {
-        let num = |k: &str, default: f64| kv.get(k).and_then(|v| v.parse().ok()).unwrap_or(default);
-        let default_bank = match kv.get("SampleSet") {
-            Some(&"Soft") => 2,
-            Some(&"Drum") => 3,
-            _ => 1,
-        };
-
-        // Row format: time,beatLength,meter,sampleSet,sampleIndex,volume,uninherited,effects
-        let mut beat = 500.0;
-        let points: Vec<Point> = rows
-            .iter()
-            .filter_map(|p| {
-                let f = |i: usize| p.get(i).and_then(|s| s.parse::<f64>().ok());
-                let (time, len) = (f(0)?, f(1)?);
-                // Old formats lack the `uninherited` column; a negative beat length marks a green line
-                let red = len > 0.0 && f(6) != Some(0.0);
-                if red {
-                    beat = len;
-                }
-                let sv = if red || len.is_nan() { 1.0 } else { (-100.0 / len).clamp(0.1, 10.0) };
-                let (bank, index, volume) = (f(3).unwrap_or(0.0) as usize, f(4).unwrap_or(0.0) as u32, f(5).unwrap_or(100.0));
-                Some(Point { time, beat, sv, bank, index, volume })
-            })
-            .collect();
-
-        (!points.is_empty()).then(|| Self {
-            points,
-            default_bank,
-            multiplier: num("SliderMultiplier", 1.4),
-            tick_rate: num("SliderTickRate", 1.0),
-        })
-    }
-
-    /// The timing point in effect at `t` (the first one if `t` precedes them all).
-    fn at(&self, t: f64) -> &Point {
-        &self.points[self.points.partition_point(|p| p.time <= t).saturating_sub(1)]
-    }
-
-    /// Resolves a bank where 0 means "inherit": object → timing point → beatmap default.
-    fn bank(&self, bank: usize, p: &Point) -> usize {
-        [bank, p.bank].into_iter().find(|b| (1..=3).contains(b)).unwrap_or(self.default_bank)
-    }
-
-    /// Sounds for a single hit: hitnormal always, plus whistle / finish / clap for each set bit.
-    fn node(&self, hits: &mut Vec<Hit>, t: f64, sound: u32, s: HitSample) {
-        // Like osu!, read sample settings slightly late so a timing point placed just after the note still applies
-        let p = self.at(t + 5.0);
-        let volume = (if s.volume > 0.0 { s.volume } else { p.volume } / 100.0) as f32;
-
-        let normal = self.bank(s.normal, p);
-
-        // A custom filename replaces all of the object's sounds; osu!'s own hitnormal stands in for it
-        if !s.file.is_empty() {
-            let default = format!("{}-hitnormal", BANKS[normal - 1]);
-            return hits.push(Hit { time: t, file: s.file.to_string(), default, volume });
-        }
-
-        let index = if s.index > 0 { s.index } else { p.index };
-        let addition = if (1..=3).contains(&s.addition) { s.addition } else { normal };
-        hits.push(sample(t, normal, "hitnormal", index, volume));
-        for (bit, name) in [(2, "hitwhistle"), (4, "hitfinish"), (8, "hitclap")] {
-            if sound & bit != 0 {
-                hits.push(sample(t, addition, name, index, volume));
-            }
-        }
-    }
-
-    /// Slider row: x,y,time,type,hitSound,curve,slides,length,edgeSounds,edgeSets,hitSample.
-    /// Plays a hit at the head, every repeat and the tail, plus ticks along the body.
-    fn slider(&self, hits: &mut Vec<Hit>, o: &[&str], time: f64, sound: u32) {
-        let f = |i: usize| o.get(i).and_then(|s| s.trim().parse::<f64>().ok());
-        let s = HitSample::parse(o.get(10).copied());
-        let p = self.at(time);
-        let span = f(7).unwrap_or(0.0) / (self.multiplier * 100.0 * p.sv) * p.beat;
-        let slides = f(6).unwrap_or(1.0).max(1.0) as usize;
-
-        // edgeSounds / edgeSets override the object's sound and banks per edge
-        let split = |i: usize| o.get(i).map_or(vec![], |s| s.split('|').collect::<Vec<_>>());
-        let (sounds, sets) = (split(8), split(9));
-        for e in 0..=slides {
-            let sound = sounds.get(e).and_then(|s| s.parse().ok()).unwrap_or(sound);
-            let set = HitSample::parse(sets.get(e).copied());
-            let pick = |a: usize, b: usize| if a > 0 { a } else { b };
-            let edge = HitSample { normal: pick(set.normal, s.normal), addition: pick(set.addition, s.addition), ..s };
-            self.node(hits, time + e as f64 * span, sound, edge);
-        }
-
-        // Ticks every beat / tick rate within each span (mirrored on reverse spans),
-        // skipping any within 10 ms of the span's end
-        let (interval, bank) = (p.beat / self.tick_rate, self.bank(s.normal, self.at(time + 5.0)));
-        for e in 0..slides {
-            let mut k = interval;
-            while interval > 1.0 && k < span - 10.0 {
-                let t = time + e as f64 * span + if e % 2 == 0 { k } else { span - k };
-                let p = self.at(t + 5.0);
-                hits.push(sample(t, bank, "slidertick", p.index, (p.volume / 100.0) as f32));
-                k += interval;
-            }
-        }
-    }
-}
-
-/// A .osu file split into `key: value` pairs, timing point rows and hit object rows.
-type Sections<'a> = (HashMap<&'a str, &'a str>, Vec<Vec<&'a str>>, Vec<Vec<&'a str>>);
-
-fn sections(text: &str) -> Sections<'_> {
-    let (mut section, mut kv, mut points, mut objects) = ("", HashMap::new(), vec![], vec![]);
-    for line in text.lines().map(str::trim) {
-        if line.starts_with('[') {
-            section = line;
-        } else if section == "[TimingPoints]" {
-            points.push(line.split(',').map(str::trim).collect());
-        } else if section == "[HitObjects]" {
-            objects.push(line.split(',').collect());
-        } else if let Some((k, v)) = line.split_once(':') {
-            kv.insert(k.trim(), v.trim());
-        }
-    }
-    (kv, points, objects)
-}
-
-/// The song's main tempo: the BPM that lasts longest, as osu! shows it
-/// (so brief gimmick BPM changes don't count).
-pub fn bpm(path: &Path) -> Option<f64> {
-    let text = String::from_utf8_lossy(&std::fs::read(path).ok()?).into_owned();
-    let (kv, points, objects) = sections(&text);
-    let timing = Timing::new(&kv, &points)?;
-    let end = objects.iter().filter_map(|o| o.get(2)?.trim().parse::<f64>().ok()).fold(0., f64::max);
-
-    // Total time per beat length, from each timing point to the next (the last one runs to the final object).
-    // Like osu!, the first timing point counts from the start of the song.
-    let mut spans: Vec<(f64, f64)> = vec![];
-    for (i, p) in timing.points.iter().enumerate() {
-        let from = if i == 0 { 0. } else { p.time };
-        let length = (timing.points.get(i + 1).map_or(end, |n| n.time) - from).max(0.);
-        match spans.iter_mut().find(|(beat, _)| (beat - p.beat).abs() < 0.01) {
-            Some((_, total)) => *total += length,
-            None => spans.push((p.beat, length)),
-        }
-    }
-    let (beat, _) = spans.into_iter().max_by(|a, b| a.1.total_cmp(&b.1))?;
-    Some(60000. / beat)
-}
-
-/// Parses a .osu file into the hitsounds an Auto play would trigger.
+/// Parses a .osu file into the hitsounds an Auto play would trigger. rosu-map decodes it like
+/// osu!lazer does, including the sample settings each object takes from the timing points.
 fn chart(path: &Path) -> Vec<Hit> {
-    let text = String::from_utf8_lossy(&std::fs::read(path).unwrap_or_default()).into_owned();
-    let (kv, points, objects) = sections(&text);
-    let Some(timing) = Timing::new(&kv, &points) else { return vec![] };
-
-    // Row format: x,y,time,type,hitSound,...; type bits: 1 circle, 2 slider, 8 spinner, 128 hold note
+    let Ok(mut map) = rosu_map::Beatmap::from_path(path) else { return vec![] };
+    let (points, tick_rate) = (&map.control_points, map.slider_tick_rate);
     let mut hits = vec![];
-    for o in &objects {
-        let f = |i: usize| o.get(i).and_then(|s| s.trim().parse::<f64>().ok());
-        let (Some(time), Some(kind), Some(sound)) = (f(2), f(3), f(4)) else { continue };
-        let (kind, sound) = (kind as u32, sound as u32);
-        match kind {
-            k if k & 2 != 0 => timing.slider(&mut hits, o, time, sound),
-            // Spinners sound once, at their end time
-            k if k & 8 != 0 => timing.node(&mut hits, f(5).unwrap_or(time), sound, HitSample::parse(o.get(6).copied())),
-            // Hold notes put the end time in front of the hit sample: endTime:normalSet:...
-            k if k & 128 != 0 => {
-                let s = o.get(5).and_then(|s| s.split_once(':')).map(|s| s.1);
-                timing.node(&mut hits, time, sound, HitSample::parse(s));
+    for o in &mut map.hit_objects {
+        let time = o.start_time;
+        match &mut o.kind {
+            // A hit at the head, every repeat and the tail, plus ticks along the body
+            HitObjectKind::Slider(slider) => {
+                let span = slider.duration() / slider.span_count() as f64;
+                for (e, samples) in slider.node_samples.iter().enumerate() {
+                    hits.extend(hits_at(time + e as f64 * span, samples));
+                }
+
+                // Ticks every beat / tick rate within each span (mirrored on reverse spans), skipping any within
+                // 10 ms of the span's end; in the slider's bank, with the index and volume of the timing point there
+                let interval = points.timing_point_at(time).map_or(1000., |p| p.beat_len) / tick_rate;
+                let bank = o.samples.first().map_or(SampleBank::Normal, |s| s.bank);
+                for e in 0..slider.span_count() {
+                    let mut k = interval;
+                    while interval > 1. && k < span - 10. {
+                        let t = time + e as f64 * span + if e % 2 == 0 { k } else { span - k };
+                        let p = points.sample_point_at(t + 5.).cloned().unwrap_or_default();
+                        hits.push(sample(t, bank, "slidertick", p.custom_sample_bank, p.sample_volume));
+                        k += interval;
+                    }
+                }
             }
-            _ => timing.node(&mut hits, time, sound, HitSample::parse(o.get(5).copied())),
+            // Spinners sound once, at their end
+            HitObjectKind::Spinner(spinner) => hits.extend(hits_at(time + spinner.duration, &o.samples)),
+            _ => hits.extend(hits_at(time, &o.samples)),
         }
     }
     hits
