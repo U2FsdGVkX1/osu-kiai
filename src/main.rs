@@ -75,6 +75,8 @@ struct MusicPlayer {
     mode: Mode,
     /// Shared with the playing source so drum mode can be toggled mid-song
     drums: Arc<AtomicBool>,
+    /// Drum mode uses osu!'s own hitsounds instead of the beatmap's
+    builtin_sounds: bool,
     device: MixerDeviceSink,
     /// `None` while nothing is playing or the next song is still loading
     player: Option<Player>,
@@ -189,6 +191,7 @@ impl MusicPlayer {
             history: vec![],
             mode: Mode::Order,
             drums: Arc::new(AtomicBool::new(false)),
+            builtin_sounds: false,
             device,
             player: None,
             duration: Duration::ZERO,
@@ -287,14 +290,14 @@ impl MusicPlayer {
         }
 
         // Rating the difficulties and decoding the hitsound samples take a moment, so do it off the UI thread
-        let (song, on, preferred) = (self.songs[ix].clone(), self.drums.clone(), self.preferred);
+        let (song, on, preferred, builtin) = (self.songs[ix].clone(), self.drums.clone(), self.preferred, self.builtin_sounds);
         self.loading = cx.spawn(async move |this, cx| {
             let (opened, stars, chart, bpm) = cx
                 .background_spawn(async move {
                     let stars: Vec<f64> = song.charts.par_iter().map(|c| library::stars(&c.path)).collect();
                     let chart = keep.unwrap_or_else(|| library::pick(&stars, preferred));
                     let bpm = drums::bpm(&song.charts[chart].path);
-                    (drums::open(&song, chart, on), stars, chart, bpm)
+                    (drums::open(&song, chart, builtin, on), stars, chart, bpm)
                 })
                 .await;
             this.update(cx, |this, cx| {
@@ -328,12 +331,13 @@ impl MusicPlayer {
     }
 
     /// Switches drum mode to another difficulty's hitsounds without interrupting the music.
+    /// Also used to reload the current difficulty's hitsounds after switching sound packs.
     fn pick_chart(&mut self, chart: usize, cx: &mut Context<Self>) {
         let (Some(ix), Some((swap, channels, rate))) = (self.current, self.swap.clone()) else { return };
         self.chart = Some(chart);
-        let song = self.songs[ix].clone();
+        let (song, builtin) = (self.songs[ix].clone(), self.builtin_sounds);
         self.picking = cx.background_spawn(async move {
-            swap.send(drums::hits(&song, chart, channels, rate)).ok();
+            swap.send(drums::hits(&song, chart, builtin, channels, rate)).ok();
         });
         cx.notify();
     }
@@ -776,6 +780,18 @@ impl MusicPlayer {
                         this.video_mode = !this.video_mode;
                         let pos = this.player.as_ref().map(Player::get_pos).unwrap_or_default();
                         this.start_video(pos);
+                        cx.notify();
+                    })),
+            )
+            .child(
+                toggle_button("sounds", IconName::Package, self.builtin_sounds, cx)
+                    .tooltip(t!("builtin_sounds"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.builtin_sounds = !this.builtin_sounds;
+                        // Swap the playing song's hitsounds right away
+                        if let Some(chart) = this.chart {
+                            this.pick_chart(chart, cx);
+                        }
                         cx.notify();
                     })),
             )

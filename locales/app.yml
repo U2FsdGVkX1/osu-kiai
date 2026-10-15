@@ -89,3 +89,6 @@ close:
 default_difficulty:
   en: "Difficulty: "
   zh-CN: 默认难度：
+builtin_sounds:
+  en: "Use osu!'s own hitsounds"
+  zh-CN: 使用 osu! 自带音效

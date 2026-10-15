@@ -48,7 +48,7 @@ struct Hit {
     time: f64,
     /// Beatmap file to try first (extension optional); empty means built-in only.
     file: String,
-    /// Built-in sample used when `file` isn't in the beatmap.
+    /// Built-in sample, used when `file` is empty or missing, or when osu!'s own sounds are wanted.
     default: String,
     volume: f32,
 }
@@ -159,13 +159,15 @@ impl Timing {
         let p = self.at(t + 5.0);
         let volume = (if s.volume > 0.0 { s.volume } else { p.volume } / 100.0) as f32;
 
-        // A custom filename replaces all of the object's sounds
+        let normal = self.bank(s.normal, p);
+
+        // A custom filename replaces all of the object's sounds; osu!'s own hitnormal stands in for it
         if !s.file.is_empty() {
-            return hits.push(Hit { time: t, file: s.file.to_string(), default: String::new(), volume });
+            let default = format!("{}-hitnormal", BANKS[normal - 1]);
+            return hits.push(Hit { time: t, file: s.file.to_string(), default, volume });
         }
 
         let index = if s.index > 0 { s.index } else { p.index };
-        let normal = self.bank(s.normal, p);
         let addition = if (1..=3).contains(&s.addition) { s.addition } else { normal };
         hits.push(sample(t, normal, "hitnormal", index, volume));
         for (bit, name) in [(2, "hitwhistle"), (4, "hitfinish"), (8, "hitclap")] {
@@ -281,10 +283,11 @@ fn chart(path: &Path) -> Vec<Hit> {
 
 // ---------- Sample loading ----------
 
-/// Decodes a sample and converts it to the music's channel count and sample rate.
-/// A beatmap file that exists but won't decode (often an intentionally empty .wav) stays silent.
-fn load(files: &HashMap<String, PathBuf>, file: &str, default: &str, channels: ChannelCount, rate: SampleRate) -> Option<Arc<[f32]>> {
-    let file = file.to_lowercase();
+/// Decodes a sample and converts it to the music's channel count and sample rate. The beatmap's
+/// file is preferred unless `builtin` asks for osu!'s own sounds; a beatmap file that exists but won't
+/// decode (often an intentionally empty .wav) stays silent.
+fn load(files: &HashMap<String, PathBuf>, file: &str, default: &str, builtin: bool, channels: ChannelCount, rate: SampleRate) -> Option<Arc<[f32]>> {
+    let file = if builtin { String::new() } else { file.to_lowercase() };
     let custom = ["", ".wav", ".ogg", ".mp3"]
         .iter()
         .find_map(|ext| files.get(&format!("{file}{ext}")))
@@ -302,15 +305,16 @@ fn load(files: &HashMap<String, PathBuf>, file: &str, default: &str, channels: C
 /// Hitsounds ready to mix: (start frame, samples in the music's format, volume), sorted by frame.
 pub type Hits = Vec<(u64, Arc<[f32]>, f32)>;
 
-/// Decodes the hitsounds of one difficulty (an index into `song.charts`) for music in the given format.
-pub fn hits(song: &Song, chart_index: usize, channels: ChannelCount, rate: SampleRate) -> Hits {
+/// Decodes the hitsounds of one difficulty (an index into `song.charts`) for music in the given format,
+/// with the beatmap's own samples or, with `builtin`, osu!'s.
+pub fn hits(song: &Song, chart_index: usize, builtin: bool, channels: ChannelCount, rate: SampleRate) -> Hits {
     let mut cache = HashMap::new();
     let mut hits: Hits = chart(&song.charts[chart_index].path)
         .into_iter()
         .filter_map(|h| {
             let samples = cache
                 .entry((h.file, h.default))
-                .or_insert_with_key(|(file, default)| load(&song.files, file, default, channels, rate))
+                .or_insert_with_key(|(file, default)| load(&song.files, file, default, builtin, channels, rate))
                 .clone()?;
             let frame = (h.time.max(0.0) * rate.get() as f64 / 1000.0) as u64;
             Some((frame, samples, h.volume * 0.7))
@@ -322,12 +326,12 @@ pub fn hits(song: &Song, chart_index: usize, channels: ChannelCount, rate: Sampl
 
 /// Opens a song for playback with the hitsounds of one difficulty (an index into `song.charts`).
 /// Hits are always prepared so drum mode can be toggled mid-song via `on`; the returned sender
-/// hands the playing source another difficulty's hitsounds (see [`hits`]).
-pub fn open(song: &Song, chart_index: usize, on: Arc<AtomicBool>) -> Option<(Drums<Decoder<BufReader<File>>>, Sender<Hits>)> {
+/// hands the playing source other hitsounds (see [`hits`]), e.g. of another difficulty.
+pub fn open(song: &Song, chart_index: usize, builtin: bool, on: Arc<AtomicBool>) -> Option<(Drums<Decoder<BufReader<File>>>, Sender<Hits>)> {
     let music = Decoder::try_from(File::open(&song.audio).ok()?).ok()?;
     let (channels, rate) = (music.channels(), music.sample_rate());
     let (swap, swaps) = mpsc::channel();
-    let hits = hits(song, chart_index, channels, rate);
+    let hits = hits(song, chart_index, builtin, channels, rate);
     Some((Drums { src: music, hits, swaps, next: 0, frame: 0, channel: 0, voices: vec![], on }, swap))
 }
 
