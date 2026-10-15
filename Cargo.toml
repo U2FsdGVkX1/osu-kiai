@@ -9,7 +9,7 @@ gpui-kit = "0.7.3"
 image = { version = "0.25", default-features = false }
 rand = "0.9"
 rayon = "1"
-rodio = { version = "0.23", default-features = false, features = ["playback", "mp3", "vorbis", "wav", "flac"] }
+rodio = { version = "0.23", default-features = false, features = ["playback", "mp3", "mp4", "vorbis", "wav", "flac"] }
 rosu-pp = "4"
 rust-i18n = "4"
 sys-locale = "0.3"

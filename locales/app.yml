@@ -92,3 +92,6 @@ default_difficulty:
 builtin_sounds:
   en: "Use osu!'s own hitsounds"
   zh-CN: 使用 osu! 自带音效
+cannot_play:
+  en: "Can't play this song: unsupported audio format"
+  zh-CN: 无法播放：不支持这个音频格式

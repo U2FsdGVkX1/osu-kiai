@@ -80,6 +80,8 @@ struct MusicPlayer {
     device: MixerDeviceSink,
     /// `None` while nothing is playing or the next song is still loading
     player: Option<Player>,
+    /// The current song's audio couldn't be opened (e.g. an unsupported format)
+    load_failed: bool,
     duration: Duration,
     /// Main tempo of the current song, read when it starts playing
     bpm: Option<f64>,
@@ -194,6 +196,7 @@ impl MusicPlayer {
             builtin_sounds: false,
             device,
             player: None,
+            load_failed: false,
             duration: Duration::ZERO,
             bpm: None,
             charts: vec![],
@@ -280,6 +283,7 @@ impl MusicPlayer {
         let keep = self.chart.filter(|_| self.current == Some(ix));
         self.current = Some(ix);
         self.player = None;
+        self.load_failed = false;
         self.bpm = None;
         self.charts.clear();
         self.stars.clear();
@@ -302,10 +306,11 @@ impl MusicPlayer {
                 .await;
             this.update(cx, |this, cx| {
                 this.bpm = bpm;
+                let mut charts: Vec<usize> = (0..stars.len()).collect();
+                charts.sort_by(|&a, &b| stars[a].total_cmp(&stars[b]));
+                (this.charts, this.stars, this.chart, this.reveal_chart) = (charts, stars, Some(chart), true);
+                this.load_failed = opened.is_none();
                 if let Some((source, swap)) = opened {
-                    let mut charts: Vec<usize> = (0..stars.len()).collect();
-                    charts.sort_by(|&a, &b| stars[a].total_cmp(&stars[b]));
-                    (this.charts, this.stars, this.chart, this.reveal_chart) = (charts, stars, Some(chart), true);
                     this.swap = Some((swap, source.channels(), source.sample_rate()));
                     let player = Player::connect_new(this.device.mixer());
                     player.set_volume(this.volume);
@@ -581,6 +586,7 @@ impl MusicPlayer {
                 .gap_1()
                 .child(div().text_xl().font_semibold().line_clamp(2).child(song.title.clone()))
                 .child(div().truncate().text_color(theme.muted_foreground).child(song.artist.clone()))
+                .when(self.load_failed, |d| d.child(div().text_sm().text_color(theme.danger).child(SharedString::from(t!("cannot_play")))))
                 // Everything below keeps its height while the song loads, so the panel doesn't jump:
                 // the chips stay on one line (a long mapper name is cut short instead of wrapping) and the
                 // difficulty row is there from the start, filling in once the stars are calculated
@@ -591,7 +597,7 @@ impl MusicPlayer {
                         .child(chip(t!("mapped_by", name = song.creator), cx).min_w_0().truncate())
                         .when_some(self.bpm, |d, bpm| d.child(chip(t!("bpm", n = bpm.round()), cx).flex_none())),
                 )
-                .when(song.charts.len() > 1, |d| d.child(self.render_charts(song, cx))),
+                .child(self.render_charts(song, cx)),
             None => v_flex()
                 .gap_1()
                 .child(div().text_xl().font_semibold().child("osu! music"))
