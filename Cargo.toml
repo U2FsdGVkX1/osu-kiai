@@ -1,5 +1,5 @@
 [package]
-name = "osu-music"
+name = "osu-kiai"
 version = "0.1.0"
 edition = "2024"
 
@@ -13,6 +13,9 @@ rodio = { version = "0.23", default-features = false, features = ["playback", "m
 rosu-pp = "4"
 rust-i18n = "4"
 sys-locale = "0.3"
+
+[build-dependencies]
+embed-resource = "3"
 
 # Hiding the mouse pointer over the video, which GPUI has no API for
 [target.'cfg(windows)'.dependencies]

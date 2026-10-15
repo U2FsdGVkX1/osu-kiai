@@ -1,4 +1,4 @@
-//! osu! music: plays the songs in your osu!stable / osu!lazer library like a regular music player,
+//! osu! kiai: plays the songs in your osu!stable / osu!lazer library like a regular music player,
 //! with an optional drum mode that adds the hitsounds an Auto play would make,
 //! and a video mode that plays the beatmap's video behind the UI.
 
@@ -600,7 +600,7 @@ impl MusicPlayer {
                 .child(self.render_charts(song, cx)),
             None => v_flex()
                 .gap_1()
-                .child(div().text_xl().font_semibold().child("osu! music"))
+                .child(div().text_xl().font_semibold().child("osu! kiai"))
                 .child(div().text_color(theme.muted_foreground).child(SharedString::from(t!("idle")))),
         };
 
@@ -1010,7 +1010,7 @@ fn main() {
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(1120.), px(720.)), cx))),
             window_min_size: Some(size(px(860.), px(640.))),
             titlebar: Some(TitlebarOptions {
-                title: Some("osu! music".into()),
+                title: Some("osu! kiai".into()),
                 ..Default::default()
             }),
             ..Default::default()

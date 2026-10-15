@@ -76,7 +76,13 @@ pub fn pick(stars: &[f64], preferred: usize) -> usize {
 // ---------- Manually added library folders ----------
 
 fn config() -> PathBuf {
-    dirs::config_dir().unwrap_or_default().join("osu-music.txt")
+    let dir = dirs::config_dir().unwrap_or_default();
+    let path = dir.join("osu-kiai.txt");
+    // Carry the list over from before the app was renamed
+    if !path.exists() {
+        fs::rename(dir.join("osu-music.txt"), &path).ok();
+    }
+    path
 }
 
 pub fn add_folder(path: &Path) {

@@ -42,11 +42,11 @@ jobs:
         shell: bash
         run: |
           if [ "$RUNNER_OS" = Windows ]; then
-            asset=osu-music-${{ matrix.name }}.exe
-            cp target/release/osu-music.exe "$asset"
+            asset=osu-kiai-${{ matrix.name }}.exe
+            cp target/release/osu-kiai.exe "$asset"
           else
-            asset=osu-music-${{ matrix.name }}.tar.gz
-            tar -czf "$asset" -C target/release osu-music
+            asset=osu-kiai-${{ matrix.name }}.tar.gz
+            tar -czf "$asset" -C target/release osu-kiai
           fi
           echo "ASSET=$asset" >> "$GITHUB_ENV"
 

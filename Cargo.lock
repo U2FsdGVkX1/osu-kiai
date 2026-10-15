@@ -4678,10 +4678,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "osu-music"
+name = "osu-kiai"
 version = "0.1.0"
 dependencies = [
  "dirs 7.0.0",
+ "embed-resource",
  "gpui-kit",
  "image",
  "objc2-app-kit 0.3.2",
