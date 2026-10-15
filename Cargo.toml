@@ -12,3 +12,10 @@ rayon = "1"
 rodio = { version = "0.23", default-features = false, features = ["playback", "mp3", "vorbis", "wav", "flac"] }
 rust-i18n = "4"
 sys-locale = "0.3"
+
+# Hiding the mouse pointer over the video, which GPUI has no API for
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_UI_WindowsAndMessaging"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSCursor"] }

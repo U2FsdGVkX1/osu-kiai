@@ -15,7 +15,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use gpui_kit::{
@@ -90,6 +90,16 @@ struct MusicPlayer {
     video: Option<Video>,
     /// Video frames no longer on screen, waiting to be freed from the GPU on the next render
     stale_frames: Vec<Arc<RenderImage>>,
+    /// Last mouse move, scroll or key press; after a few idle seconds the UI fades out over the video
+    last_input: Instant,
+    /// Opacity of the UI on top of the video, 0 once it has faded out completely
+    ui_opacity: f32,
+    /// When `ui_opacity` was last advanced
+    last_frame: Instant,
+    /// Last mouse position seen, to ignore the move events repeated while the mouse stands still
+    mouse: Point<Pixels>,
+    /// The mouse pointer is hidden because the UI has faded out
+    cursor_hidden: bool,
 
     // Widgets
     search: Entity<InputState>,
@@ -165,6 +175,11 @@ impl MusicPlayer {
             ffmpeg: video::available(),
             video: None,
             stale_frames: vec![],
+            last_input: Instant::now(),
+            ui_opacity: 1.,
+            last_frame: Instant::now(),
+            mouse: Point::default(),
+            cursor_hidden: false,
             search,
             progress,
             volume_slider,
@@ -264,6 +279,29 @@ impl MusicPlayer {
         if self.video_mode && self.ffmpeg {
             self.video = video.and_then(|(path, offset)| Video::open(&path, offset, from.as_secs_f64() * 1000.));
         }
+    }
+
+    /// Any user input: brings the UI back if it faded out over the video.
+    fn wake(&mut self, cx: &mut Context<Self>) {
+        self.last_input = Instant::now();
+        if self.ui_opacity < 1. {
+            cx.notify();
+        }
+    }
+
+    /// Move events also arrive with every redraw while the mouse stands still, so only real moves count.
+    fn mouse_moved(&mut self, e: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if e.position != self.mouse {
+            self.mouse = e.position;
+            self.wake(cx);
+        }
+    }
+
+    /// The UI hides while a video plays and nothing has been touched for a few seconds.
+    fn idle(&self) -> bool {
+        self.video.as_ref().is_some_and(|v| v.frame.is_some())
+            && self.player.as_ref().is_some_and(|p| !p.is_paused())
+            && self.last_input.elapsed() > Duration::from_secs(3)
     }
 
     /// `auto` is true when the current song finished on its own (only then does Repeat replay it).
@@ -661,6 +699,23 @@ fn ffmpeg_dialog(window: &mut Window, cx: &mut App) {
     });
 }
 
+/// Hides the mouse pointer while it is over our window, or shows it again. GPUI has no API for this,
+/// so it goes to the OS directly. Not supported on Linux, where GPUI owns the X11 / Wayland cursor.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(unused_variables))]
+fn set_cursor_hidden(hidden: bool) {
+    // A per-thread display counter: other apps' windows keep their pointer, and the cursor shapes
+    // GPUI keeps setting on every mouse message don't bring it back
+    #[cfg(windows)]
+    unsafe {
+        windows::Win32::UI::WindowsAndMessaging::ShowCursor(!hidden);
+    }
+    // macOS brings the pointer back by itself on the next mouse move
+    #[cfg(target_os = "macos")]
+    if hidden {
+        objc2_app_kit::NSCursor::setHiddenUntilMouseMoves(true);
+    }
+}
+
 /// An icon button that turns pink while `on`.
 fn toggle_button(id: &'static str, icon: IconName, on: bool, cx: &App) -> Button {
     let theme = cx.theme();
@@ -728,25 +783,60 @@ impl Render for MusicPlayer {
             cx.drop_image(frame, Some(window));
         }
 
+        // Once idle, fade the UI (and the scrim) out over a second until only the video is left;
+        // on input, fade it back in within a fifth of a second
+        let idle = self.idle();
+        let target = if idle { 0. } else { 1. };
+        let step = self.last_frame.elapsed().as_secs_f32().min(0.1);
+        self.last_frame = Instant::now();
+        self.ui_opacity = if idle { (self.ui_opacity - step).max(0.) } else { (self.ui_opacity + step * 5.).min(1.) };
+        if self.ui_opacity != target {
+            window.request_animation_frame();
+        }
+        // Once the UI is gone, hide the pointer too; it comes back with the first real mouse move
+        let hide_cursor = idle && self.ui_opacity == 0.;
+        if hide_cursor != self.cursor_hidden {
+            self.cursor_hidden = hide_cursor;
+            set_cursor_hidden(hide_cursor);
+        }
+
         let theme = cx.theme();
         let frame = self.video.as_ref().and_then(|v| v.frame.clone());
+        // Light themes need a stronger scrim, as dark video areas would otherwise swallow grey text
+        let scrim = if theme.is_dark() { 0.78 } else { 0.85 } * self.ui_opacity;
         div()
             .size_full()
             .bg(theme.background)
             .text_color(theme.foreground)
+            .on_mouse_move(cx.listener(|this, e, _, cx| this.mouse_moved(e, cx)))
+            .on_scroll_wheel(cx.listener(|this, _, _, cx| this.wake(cx)))
+            .on_key_down(cx.listener(|this, _, _, cx| this.wake(cx)))
             // Video mode: the video fills the window behind a scrim in the theme's background colour
-            // (light themes need a stronger one, as dark video areas would otherwise swallow grey text)
             .when_some(frame, |d, frame| {
                 d.child(img(frame).absolute().top_0().left_0().size_full().object_fit(ObjectFit::Cover))
-                    .child(div().absolute().top_0().left_0().size_full().bg(theme.background.opacity(if theme.is_dark() { 0.78 } else { 0.85 })))
+                    .child(div().absolute().top_0().left_0().size_full().bg(theme.background.opacity(scrim)))
             })
             .child(
                 h_flex()
                     .relative()
                     .size_full()
+                    .opacity(self.ui_opacity)
                     .child(self.render_library(cx))
                     .child(self.render_now_playing(cx)),
             )
+            // While hidden, a click only brings the UI back instead of reaching the invisible controls
+            .when(idle, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .occlude()
+                        .on_mouse_move(cx.listener(|this, e, _, cx| this.mouse_moved(e, cx)))
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.wake(cx))),
+                )
+            })
     }
 }
 

@@ -4627,11 +4627,13 @@ dependencies = [
  "dirs 7.0.0",
  "gpui-kit",
  "image",
+ "objc2-app-kit 0.3.2",
  "rand 0.9.5",
  "rayon",
  "rodio",
  "rust-i18n",
  "sys-locale",
+ "windows 0.62.2",
 ]
 
 [[package]]
