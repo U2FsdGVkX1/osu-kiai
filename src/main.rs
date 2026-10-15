@@ -642,24 +642,31 @@ impl MusicPlayer {
                 v_flex()
                     .relative()
                     .flex_1()
-                    .justify_center()
                     .px_6()
                     .py_8()
-                    .gap_6()
-                    .child(div().relative().w_full().h(px(164.)).rounded_xl().shadow_lg().child(art))
-                    .child(info)
-                    .child(progress)
-                    .child(self.render_transport(cx))
-                    .child(self.render_options(cx)),
-            )
-            // Pinned to the bottom-right corner; its menu flips upwards since there's no room below
-            .child(
-                div().relative().px_6().pb_5().child(
-                    Select::new(&self.difficulty)
-                        .id("difficulty")
-                        .title_prefix(t!("default_difficulty"))
-                        .w_full(),
-                ),
+                    .gap_8()
+                    // Three groups: the song and playback centred in the space above, settings at the bottom
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .justify_center()
+                            .gap_8()
+                            .child(
+                                v_flex()
+                                    .gap_5()
+                                    .child(div().relative().w_full().h(px(164.)).rounded_xl().shadow_lg().child(art))
+                                    .child(info),
+                            )
+                            .child(v_flex().gap_3().child(progress).child(self.render_transport(cx))),
+                    )
+                    .child(
+                        v_flex().gap_3().child(self.render_options(cx)).child(
+                            Select::new(&self.difficulty)
+                                .id("difficulty")
+                                .title_prefix(t!("default_difficulty"))
+                                .w_full(),
+                        ),
+                    ),
             )
     }
 
@@ -992,7 +999,7 @@ fn main() {
         gpui_kit::init(cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(1120.), px(720.)), cx))),
-            window_min_size: Some(size(px(860.), px(560.))),
+            window_min_size: Some(size(px(860.), px(640.))),
             titlebar: Some(TitlebarOptions {
                 title: Some("osu! music".into()),
                 ..Default::default()
