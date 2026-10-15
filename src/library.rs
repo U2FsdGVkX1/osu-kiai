@@ -31,9 +31,46 @@ pub struct Song {
     /// Background video and the music time it starts at, in ms
     pub video: Option<(PathBuf, f64)>,
     /// Every difficulty that uses this audio file
-    pub charts: Vec<PathBuf>,
+    pub charts: Vec<Chart>,
     /// All files of the beatmap set, where drum mode looks for custom samples
     pub files: Arc<Files>,
+}
+
+/// One difficulty (.osu file) of a song.
+#[derive(Clone)]
+pub struct Chart {
+    /// The difficulty name, e.g. "Insane"
+    pub name: String,
+    pub path: PathBuf,
+}
+
+// ---------- Difficulty ----------
+
+/// osu!'s difficulty categories, which it derives from the star rating (.osu files don't store them).
+pub const CATEGORIES: [&str; 6] = ["Easy", "Normal", "Hard", "Insane", "Expert", "Expert+"];
+
+/// The category of a star rating, as an index into [`CATEGORIES`] (lazer's thresholds).
+pub fn category(stars: f64) -> usize {
+    [2.0, 2.7, 4.0, 5.3, 6.5].iter().filter(|&&t| stars >= t).count()
+}
+
+/// Star rating of a difficulty, calculated like osu!lazer does (0 if it can't be read).
+pub fn stars(chart: &Path) -> f64 {
+    rosu_pp::Beatmap::from_path(chart)
+        .ok()
+        .and_then(|map| rosu_pp::Difficulty::new().checked_calculate(&map).ok())
+        .map_or(0., |attrs| attrs.stars())
+}
+
+/// The difficulty to play for a preferred category: the hardest one in that category or below,
+/// or the easiest one if all of them are harder.
+pub fn pick(stars: &[f64], preferred: usize) -> usize {
+    let by_stars = |a: &usize, b: &usize| stars[*a].total_cmp(&stars[*b]);
+    (0..stars.len())
+        .filter(|&i| category(stars[i]) <= preferred)
+        .max_by(by_stars)
+        .or_else(|| (0..stars.len()).min_by(by_stars))
+        .unwrap_or(0)
 }
 
 // ---------- Manually added library folders ----------
@@ -210,13 +247,14 @@ fn songs_of(files: Files) -> Vec<Song> {
         };
         // Videos can be missing (e.g. "no video" downloads), so only keep ones that exist
         let video = video.and_then(|(file, offset)| Some((files.get(&file)?.clone(), offset)));
+        let get = |k: &str| kv.get(k).cloned().unwrap_or_default();
+        let chart = Chart { name: get("Version"), path: chart.clone() };
         if let Some(song) = songs.iter_mut().find(|s| &s.audio == audio) {
-            song.charts.push(chart.clone());
+            song.charts.push(chart);
             song.video = song.video.take().or(video);
             continue;
         }
 
-        let get = |k: &str| kv.get(k).cloned().unwrap_or_default();
         // Prefer the original-script title / artist, falling back to the romanised one
         let unicode = |k: &str, fallback: &str| Some(get(k)).filter(|v| !v.is_empty()).unwrap_or_else(|| get(fallback));
         let key = ["Title", "TitleUnicode", "Artist", "ArtistUnicode", "Creator", "Source", "Tags"].map(get);
@@ -228,7 +266,7 @@ fn songs_of(files: Files) -> Vec<Song> {
             audio: audio.clone(),
             cover: background.and_then(|b| files.get(&b).cloned()),
             video,
-            charts: vec![chart.clone()],
+            charts: vec![chart],
             files: files.clone(),
         });
     }

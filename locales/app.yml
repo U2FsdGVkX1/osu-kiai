@@ -86,3 +86,6 @@ ffmpeg_download:
 close:
   en: Close
   zh-CN: 关闭
+default_difficulty:
+  en: "Difficulty: "
+  zh-CN: 默认难度：

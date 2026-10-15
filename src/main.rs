@@ -14,6 +14,7 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
+        mpsc::Sender,
     },
     time::{Duration, Instant},
 };
@@ -21,20 +22,23 @@ use std::{
 use gpui_kit::{
     assets::{AllAssets, IconName},
     component::{
-        ActiveTheme, Icon, Sizable, StyledExt, Theme, WindowExt,
+        ActiveTheme, Icon, IndexPath, Sizable, StyledExt, Theme, WindowExt,
         button::{Button, ButtonRounded, ButtonVariants},
         clipboard::Clipboard,
         dialog::{DialogClose, DialogFooter},
         h_flex,
         input::{Input, InputEvent, InputState},
+        select::{Select, SelectEvent, SelectState},
         slider::{Slider, SliderEvent, SliderState},
         v_flex,
     },
     prelude::*,
     *,
 };
-use library::Song;
-use rodio::{DeviceSinkBuilder, MixerDeviceSink, Player, Source};
+use drums::Hits;
+use library::{CATEGORIES, Song};
+use rayon::prelude::*;
+use rodio::{ChannelCount, DeviceSinkBuilder, MixerDeviceSink, Player, SampleRate, Source};
 use rust_i18n::t;
 use video::Video;
 
@@ -77,6 +81,21 @@ struct MusicPlayer {
     duration: Duration,
     /// Main tempo of the current song, read when it starts playing
     bpm: Option<f64>,
+    /// Difficulties of the current song (indices into its charts), from easiest to hardest
+    charts: Vec<usize>,
+    /// Star rating of each of the current song's charts
+    stars: Vec<f64>,
+    /// Preferred difficulty category (an index into `library::CATEGORIES`) for picking a song's difficulty
+    preferred: usize,
+    /// The difficulty drum mode plays the hitsounds of
+    chart: Option<usize>,
+    /// Hands another difficulty's hitsounds to the playing source, with the music's format to decode them in
+    swap: Option<(Sender<Hits>, ChannelCount, SampleRate)>,
+    /// Hitsounds being decoded for a newly picked difficulty; replacing it cancels the previous pick
+    picking: Task<()>,
+    charts_scroll: ScrollHandle,
+    /// The difficulty tags just appeared; scroll the selected one (the busiest, at the end) into view
+    reveal_chart: bool,
     volume: f32,
     /// The user is dragging the progress bar, so the timer must not move it
     seeking: bool,
@@ -103,6 +122,7 @@ struct MusicPlayer {
 
     // Widgets
     search: Entity<InputState>,
+    difficulty: Entity<SelectState<Vec<&'static str>>>,
     progress: Entity<SliderState>,
     volume_slider: Entity<SliderState>,
     list: UniformListScrollHandle,
@@ -114,8 +134,13 @@ impl MusicPlayer {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder(t!("search")));
         let progress = cx.new(|_| SliderState::new().max(1.).step(0.001));
         let volume_slider = cx.new(|_| SliderState::new().max(1.).step(0.01).default_value(0.8));
+        let difficulty = cx.new(|cx| SelectState::new(CATEGORIES.to_vec(), Some(IndexPath::new(CATEGORIES.len() - 1)), window, cx));
 
         let _subscriptions = vec![
+            cx.subscribe(&difficulty, |this, _, e: &SelectEvent<Vec<&'static str>>, cx| {
+                let SelectEvent::Confirm(Some(category)) = e else { return };
+                this.prefer(CATEGORIES.iter().position(|c| c == category).unwrap_or(CATEGORIES.len() - 1), cx);
+            }),
             cx.subscribe(&search, |this, _, e: &InputEvent, cx| {
                 if matches!(e, InputEvent::Change) {
                     this.filter(cx);
@@ -168,6 +193,14 @@ impl MusicPlayer {
             player: None,
             duration: Duration::ZERO,
             bpm: None,
+            charts: vec![],
+            stars: vec![],
+            preferred: CATEGORIES.len() - 1,
+            chart: None,
+            swap: None,
+            picking: Task::ready(()),
+            charts_scroll: ScrollHandle::new(),
+            reveal_chart: false,
             volume: 0.8,
             seeking: false,
             loading: Task::ready(()),
@@ -181,6 +214,7 @@ impl MusicPlayer {
             mouse: Point::default(),
             cursor_hidden: false,
             search,
+            difficulty,
             progress,
             volume_slider,
             list: UniformListScrollHandle::new(),
@@ -239,22 +273,37 @@ impl MusicPlayer {
     // ---------- Playback ----------
 
     fn play(&mut self, ix: usize, cx: &mut Context<Self>) {
+        // Replaying the same song (e.g. on repeat) keeps the difficulty that was picked
+        let keep = self.chart.filter(|_| self.current == Some(ix));
         self.current = Some(ix);
         self.player = None;
         self.bpm = None;
+        self.charts.clear();
+        self.stars.clear();
+        self.chart = None;
+        self.swap = None;
         if let Some(pos) = self.shown.iter().position(|&i| i == ix) {
             self.list.scroll_to_item(pos, ScrollStrategy::Nearest);
         }
 
-        // Decoding the hitsound samples can take a moment, so do it off the UI thread
-        let (song, on) = (self.songs[ix].clone(), self.drums.clone());
+        // Rating the difficulties and decoding the hitsound samples take a moment, so do it off the UI thread
+        let (song, on, preferred) = (self.songs[ix].clone(), self.drums.clone(), self.preferred);
         self.loading = cx.spawn(async move |this, cx| {
-            let (source, bpm) = cx
-                .background_spawn(async move { (drums::open(&song, on), song.charts.first().and_then(|c| drums::bpm(c))) })
+            let (opened, stars, chart, bpm) = cx
+                .background_spawn(async move {
+                    let stars: Vec<f64> = song.charts.par_iter().map(|c| library::stars(&c.path)).collect();
+                    let chart = keep.unwrap_or_else(|| library::pick(&stars, preferred));
+                    let bpm = drums::bpm(&song.charts[chart].path);
+                    (drums::open(&song, chart, on), stars, chart, bpm)
+                })
                 .await;
             this.update(cx, |this, cx| {
                 this.bpm = bpm;
-                if let Some(source) = source {
+                if let Some((source, swap)) = opened {
+                    let mut charts: Vec<usize> = (0..stars.len()).collect();
+                    charts.sort_by(|&a, &b| stars[a].total_cmp(&stars[b]));
+                    (this.charts, this.stars, this.chart, this.reveal_chart) = (charts, stars, Some(chart), true);
+                    this.swap = Some((swap, source.channels(), source.sample_rate()));
                     let player = Player::connect_new(this.device.mixer());
                     player.set_volume(this.volume);
                     this.duration = source.total_duration().unwrap_or_default();
@@ -265,6 +314,26 @@ impl MusicPlayer {
                 cx.notify();
             })
             .ok();
+        });
+        cx.notify();
+    }
+
+    /// A new preferred category also re-picks the difficulty of the song that's playing.
+    fn prefer(&mut self, category: usize, cx: &mut Context<Self>) {
+        self.preferred = category;
+        if !self.stars.is_empty() {
+            self.pick_chart(library::pick(&self.stars, category), cx);
+            self.reveal_chart = true;
+        }
+    }
+
+    /// Switches drum mode to another difficulty's hitsounds without interrupting the music.
+    fn pick_chart(&mut self, chart: usize, cx: &mut Context<Self>) {
+        let (Some(ix), Some((swap, channels, rate))) = (self.current, self.swap.clone()) else { return };
+        self.chart = Some(chart);
+        let song = self.songs[ix].clone();
+        self.picking = cx.background_spawn(async move {
+            swap.send(drums::hits(&song, chart, channels, rate)).ok();
         });
         cx.notify();
     }
@@ -335,6 +404,12 @@ impl MusicPlayer {
     }
 
     fn tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Done here rather than when the tags appear: the scroll position needs their first layout
+        if std::mem::take(&mut self.reveal_chart) {
+            let pos = self.charts.iter().position(|&i| Some(i) == self.chart).unwrap_or(0);
+            self.charts_scroll.scroll_to_item(pos);
+            cx.notify();
+        }
         let Some(p) = &self.player else { return };
         if p.empty() {
             return self.next(true, cx);
@@ -509,7 +584,8 @@ impl MusicPlayer {
                         .flex_wrap()
                         .child(chip(t!("mapped_by", name = song.creator), cx))
                         .when_some(self.bpm, |d, bpm| d.child(chip(t!("bpm", n = bpm.round()), cx))),
-                ),
+                )
+                .when(self.charts.len() > 1, |d| d.child(self.render_charts(song, cx))),
             None => v_flex()
                 .gap_1()
                 .child(div().text_xl().font_semibold().child("osu! music"))
@@ -572,6 +648,56 @@ impl MusicPlayer {
                     .child(self.render_transport(cx))
                     .child(self.render_options(cx)),
             )
+            // Pinned to the bottom-right corner; its menu flips upwards since there's no room below
+            .child(
+                div().relative().px_6().pb_5().child(
+                    Select::new(&self.difficulty)
+                        .id("difficulty")
+                        .title_prefix(t!("default_difficulty"))
+                        .w_full(),
+                ),
+            )
+    }
+
+    /// Difficulty tags, easiest first: drum mode plays the hitsounds of the selected one.
+    /// A single row that scrolls sideways (with the mouse wheel too), so big sets don't push the
+    /// controls away; the tag cut off at the edge shows there is more.
+    fn render_charts(&self, song: &Song, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        h_flex()
+            .id("charts")
+            .w_full()
+            .pt_1()
+            .gap_1p5()
+            .overflow_x_scroll()
+            .track_scroll(&self.charts_scroll)
+            .children(self.charts.iter().map(|&i| {
+                let (selected, stars) = (self.chart == Some(i), self.stars[i]);
+                // A dot in the category's colour (osu-web's palette), then the name and star rating
+                let dot = div()
+                    .size(px(8.))
+                    .rounded_full()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(rgb([0x88b300, 0x66ccff, 0xffcc22, 0xff66aa, 0x8866ee, 0x000000][library::category(stars)]));
+                h_flex()
+                    .id(("chart", i))
+                    .flex_none()
+                    .gap_1p5()
+                    .px_2()
+                    .py_0p5()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(if selected { theme.primary } else { theme.border })
+                    .when(selected, |d| d.bg(theme.list_active))
+                    .text_xs()
+                    .text_color(if selected { theme.primary } else { theme.muted_foreground })
+                    .cursor_pointer()
+                    .child(dot)
+                    .child(song.charts[i].name.clone())
+                    .child(div().opacity(0.7).child(format!("{stars:.2}★")))
+                    .on_click(cx.listener(move |this, _, _, cx| this.pick_chart(i, cx)))
+            }))
     }
 
     /// Previous, play / pause and next.

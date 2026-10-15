@@ -10,6 +10,7 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver, Sender},
     },
     time::Duration,
 };
@@ -298,16 +299,13 @@ fn load(files: &HashMap<String, PathBuf>, file: &str, default: &str, channels: C
     (!samples.is_empty()).then_some(samples)
 }
 
-/// Opens a song for playback. Hits are always prepared so drum mode can be toggled mid-song via `on`.
-pub fn open(song: &Song, on: Arc<AtomicBool>) -> Option<Drums<Decoder<BufReader<File>>>> {
-    let music = Decoder::try_from(File::open(&song.audio).ok()?).ok()?;
-    let (channels, rate) = (music.channels(), music.sample_rate());
+/// Hitsounds ready to mix: (start frame, samples in the music's format, volume), sorted by frame.
+pub type Hits = Vec<(u64, Arc<[f32]>, f32)>;
 
-    // Use the difficulty with the most hitsounds
-    let hits = song.charts.iter().map(|c| chart(c)).max_by_key(Vec::len).unwrap_or_default();
-
+/// Decodes the hitsounds of one difficulty (an index into `song.charts`) for music in the given format.
+pub fn hits(song: &Song, chart_index: usize, channels: ChannelCount, rate: SampleRate) -> Hits {
     let mut cache = HashMap::new();
-    let mut hits: Vec<_> = hits
+    let mut hits: Hits = chart(&song.charts[chart_index].path)
         .into_iter()
         .filter_map(|h| {
             let samples = cache
@@ -319,8 +317,18 @@ pub fn open(song: &Song, on: Arc<AtomicBool>) -> Option<Drums<Decoder<BufReader<
         })
         .collect();
     hits.sort_by_key(|h| h.0);
+    hits
+}
 
-    Some(Drums { src: music, hits, next: 0, frame: 0, channel: 0, voices: vec![], on })
+/// Opens a song for playback with the hitsounds of one difficulty (an index into `song.charts`).
+/// Hits are always prepared so drum mode can be toggled mid-song via `on`; the returned sender
+/// hands the playing source another difficulty's hitsounds (see [`hits`]).
+pub fn open(song: &Song, chart_index: usize, on: Arc<AtomicBool>) -> Option<(Drums<Decoder<BufReader<File>>>, Sender<Hits>)> {
+    let music = Decoder::try_from(File::open(&song.audio).ok()?).ok()?;
+    let (channels, rate) = (music.channels(), music.sample_rate());
+    let (swap, swaps) = mpsc::channel();
+    let hits = hits(song, chart_index, channels, rate);
+    Some((Drums { src: music, hits, swaps, next: 0, frame: 0, channel: 0, voices: vec![], on }, swap))
 }
 
 // ---------- Mixing source ----------
@@ -328,8 +336,9 @@ pub fn open(song: &Song, on: Arc<AtomicBool>) -> Option<Drums<Decoder<BufReader<
 /// Wraps the music source and adds hitsounds into it at exact sample frames.
 pub struct Drums<S> {
     src: S,
-    /// (start frame, samples, volume), sorted by frame
-    hits: Vec<(u64, Arc<[f32]>, f32)>,
+    hits: Hits,
+    /// Replacement hitsounds, when another difficulty is picked mid-song
+    swaps: Receiver<Hits>,
     /// Index of the next hit to start
     next: usize,
     /// Current frame (one sample per channel)
@@ -349,6 +358,11 @@ impl<S: Source> Iterator for Drums<S> {
 
         // At each frame boundary, start every hit that is due
         if self.channel == 0 {
+            // Another difficulty was picked: carry on with its hitsounds from here
+            if let Ok(hits) = self.swaps.try_recv() {
+                self.next = hits.partition_point(|h| h.0 < self.frame);
+                self.hits = hits;
+            }
             while let Some((t, samples, volume)) = self.hits.get(self.next)
                 && *t <= self.frame
             {
