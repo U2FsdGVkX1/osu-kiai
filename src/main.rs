@@ -581,15 +581,17 @@ impl MusicPlayer {
                 .gap_1()
                 .child(div().text_xl().font_semibold().line_clamp(2).child(song.title.clone()))
                 .child(div().truncate().text_color(theme.muted_foreground).child(song.artist.clone()))
+                // Everything below keeps its height while the song loads, so the panel doesn't jump:
+                // the chips stay on one line (a long mapper name is cut short instead of wrapping) and the
+                // difficulty row is there from the start, filling in once the stars are calculated
                 .child(
                     h_flex()
                         .pt_2()
                         .gap_2()
-                        .flex_wrap()
-                        .child(chip(t!("mapped_by", name = song.creator), cx))
-                        .when_some(self.bpm, |d, bpm| d.child(chip(t!("bpm", n = bpm.round()), cx))),
+                        .child(chip(t!("mapped_by", name = song.creator), cx).min_w_0().truncate())
+                        .when_some(self.bpm, |d, bpm| d.child(chip(t!("bpm", n = bpm.round()), cx).flex_none())),
                 )
-                .when(self.charts.len() > 1, |d| d.child(self.render_charts(song, cx))),
+                .when(song.charts.len() > 1, |d| d.child(self.render_charts(song, cx))),
             None => v_flex()
                 .gap_1()
                 .child(div().text_xl().font_semibold().child("osu! music"))
@@ -671,14 +673,15 @@ impl MusicPlayer {
     }
 
     /// Difficulty tags, easiest first: drum mode plays the hitsounds of the selected one.
-    /// A single row that scrolls sideways (with the mouse wheel too), so big sets don't push the
-    /// controls away; the tag cut off at the edge shows there is more.
+    /// A single fixed-height row that scrolls sideways (with the mouse wheel too), so big sets don't
+    /// push the controls away and it can hold its place, empty, while the song loads.
     fn render_charts(&self, song: &Song, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         h_flex()
             .id("charts")
             .w_full()
-            .pt_1()
+            .h(px(28.))
+            .mt_1()
             .gap_1p5()
             .overflow_x_scroll()
             .track_scroll(&self.charts_scroll)
