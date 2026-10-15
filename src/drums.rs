@@ -30,7 +30,7 @@ use crate::library::Song;
 
 macro_rules! samples {
     ($($name:literal)*) => {
-        [$(($name, include_bytes!(concat!("../assets/", $name, ".wav")) as &[u8])),*]
+        [$(($name, include_bytes!(concat!("../assets/", $name, ".flac")) as &[u8])),*]
     };
 }
 
